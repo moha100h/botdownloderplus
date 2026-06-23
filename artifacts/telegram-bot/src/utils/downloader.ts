@@ -2,10 +2,10 @@ import YTDlpWrapModule from "yt-dlp-wrap";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { config } from "../config.js";
-import { ensureDownloadDir, getFileSizeMb } from "./fileUtils.js";
+import { ensureDownloadDir, getFileSizeMb, findDownloadedFile } from "./fileUtils.js";
 import { logger } from "./logger.js";
 
-// yt-dlp-wrap is CJS; the actual class lives at .default.default in ESM context
+// yt-dlp-wrap is CJS; the actual class lives at .default in ESM context
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const YTDlpWrap: typeof YTDlpWrapModule = (YTDlpWrapModule as any).default ?? YTDlpWrapModule;
 
@@ -42,15 +42,23 @@ export interface DownloadOptions {
   maxFileSizeMb?: number;
 }
 
-function buildYtdlpArgs(url: string, format: DownloadFormat, outputPath: string, maxFileSizeMb?: number): string[] {
-  const sizeFlag = maxFileSizeMb ? [`--max-filesize`, `${maxFileSizeMb}M`] : [];
-  const baseArgs = [url, "-o", outputPath, "--no-warnings", "--restrict-filenames", ...sizeFlag];
+function buildYtdlpArgs(
+  url: string,
+  format: DownloadFormat,
+  outputTemplate: string,
+): string[] {
+  const base = [
+    url,
+    "-o", outputTemplate,
+    "--no-warnings",
+    "--restrict-filenames",
+    "--no-playlist",
+  ];
 
   switch (format) {
     case "mp3":
       return [
-        ...baseArgs,
-        "--no-playlist",
+        ...base,
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
@@ -59,28 +67,29 @@ function buildYtdlpArgs(url: string, format: DownloadFormat, outputPath: string,
       ];
     case "mp4_360":
       return [
-        ...baseArgs,
-        "--no-playlist",
-        "-f", "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]",
+        ...base,
+        "-f", "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
         "--merge-output-format", "mp4",
       ];
     case "mp4_720":
       return [
-        ...baseArgs,
-        "--no-playlist",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]",
+        ...base,
+        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
         "--merge-output-format", "mp4",
       ];
     case "mp4_1080":
       return [
-        ...baseArgs,
-        "--no-playlist",
-        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]",
+        ...base,
+        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "--merge-output-format", "mp4",
       ];
     case "best":
     default:
-      return [...baseArgs, "--no-playlist", "-f", "best", "--merge-output-format", "mp4"];
+      return [
+        ...base,
+        "-f", "bestvideo+bestaudio/best",
+        "--merge-output-format", "mp4",
+      ];
   }
 }
 
@@ -89,7 +98,7 @@ async function execDownload(
   args: string[],
   onProgress?: (pct: number) => void,
 ): Promise<void> {
-  let lastPercent = 0;
+  let lastPercent = -1;
   await new Promise<void>((resolve, reject) => {
     const proc = dl.exec(args);
     proc.on("ytDlpEvent", (eventType: string, eventData: string) => {
@@ -104,7 +113,7 @@ async function execDownload(
         }
       }
     });
-    proc.on("error", reject);
+    proc.on("error", (err: Error) => reject(err));
     proc.on("close", () => resolve());
   });
 }
@@ -113,12 +122,28 @@ export async function downloadMedia(opts: DownloadOptions): Promise<DownloadResu
   ensureDownloadDir();
   const dl = await getYtDlp();
   const uid = randomUUID();
-  const ext = opts.format === "mp3" ? "mp3" : "mp4";
-  const outputPath = join(config.downloadDir, `${uid}.%(ext)s`);
-  const finalPath = join(config.downloadDir, `${uid}.${ext}`);
+  const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
 
-  const args = buildYtdlpArgs(opts.url, opts.format, outputPath, opts.maxFileSizeMb);
+  const args = buildYtdlpArgs(opts.url, opts.format, outputTemplate);
+  logger.debug({ args }, "Starting yt-dlp");
+
   await execDownload(dl, args, opts.onProgress);
+
+  // Find the actual output file — yt-dlp may produce .mp4, .webm, .mkv, etc.
+  const filePath = findDownloadedFile(uid);
+  if (!filePath) {
+    throw new Error(`yt-dlp completed but no output file found for uid=${uid}`);
+  }
+
+  const fileSizeMb = getFileSizeMb(filePath);
+
+  // Enforce file size limit after download
+  if (opts.maxFileSizeMb && fileSizeMb > opts.maxFileSizeMb) {
+    throw Object.assign(
+      new Error(`File size ${fileSizeMb.toFixed(1)}MB exceeds limit of ${opts.maxFileSizeMb}MB`),
+      { code: "FILE_TOO_LARGE", filePath, fileSizeMb },
+    );
+  }
 
   let title = "media";
   try {
@@ -126,12 +151,44 @@ export async function downloadMedia(opts: DownloadOptions): Promise<DownloadResu
     title = (info as Record<string, unknown>).title as string ?? "media";
   } catch { }
 
-  const fileSizeMb = getFileSizeMb(finalPath);
-  logger.info({ finalPath, fileSizeMb, title }, "Download complete");
-  return { filePath: finalPath, title, fileSizeMb };
+  logger.info({ filePath, fileSizeMb, title }, "Download complete");
+  return { filePath, title, fileSizeMb };
 }
 
-// ─── Spotify via oEmbed + YouTube Search ────────────────────────────────────
+// ─── Radio Javan: resolve rj.app short links ─────────────────────────────────
+
+/**
+ * rj.app/m/XXX  →  play.radiojavan.com/song/SLUG  →  radiojavan.com/mp3s/mp3/SLUG
+ * rj.app/v/XXX  →  play.radiojavan.com/video/SLUG →  radiojavan.com/videos/video/SLUG
+ */
+export async function resolveRjUrl(url: string): Promise<string> {
+  if (!url.includes("rj.app")) return url;
+
+  try {
+    // Follow redirect without downloading body
+    const res = await fetch(url, { method: "HEAD", redirect: "follow" });
+    const finalUrl = res.url;
+    logger.info({ original: url, resolved: finalUrl }, "Resolved rj.app redirect");
+
+    // Convert play.radiojavan.com/song/SLUG → radiojavan.com/mp3s/mp3/SLUG
+    const songMatch = finalUrl.match(/play\.radiojavan\.com\/song\/([^?&#]+)/);
+    if (songMatch) return `https://www.radiojavan.com/mp3s/mp3/${songMatch[1]}`;
+
+    const videoMatch = finalUrl.match(/play\.radiojavan\.com\/video\/([^?&#]+)/);
+    if (videoMatch) return `https://www.radiojavan.com/videos/video/${videoMatch[1]}`;
+
+    const podcastMatch = finalUrl.match(/play\.radiojavan\.com\/podcast\/([^?&#]+)/);
+    if (podcastMatch) return `https://www.radiojavan.com/podcasts/podcast/${podcastMatch[1]}`;
+
+    // Fallback: return original resolved URL
+    return finalUrl;
+  } catch (err) {
+    logger.warn({ err, url }, "Could not resolve rj.app URL, using original");
+    return url;
+  }
+}
+
+// ─── Spotify via oEmbed + YouTube Search ─────────────────────────────────────
 
 interface SpotifyOEmbed {
   title: string;
@@ -145,6 +202,49 @@ async function getSpotifyTrackInfo(spotifyUrl: string): Promise<SpotifyOEmbed> {
   return res.json() as Promise<SpotifyOEmbed>;
 }
 
+async function getSpotifyAnonymousToken(): Promise<string> {
+  const res = await fetch(
+    "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Cookie": "sp_t=1",
+      },
+    },
+  );
+  if (!res.ok) throw new Error(`Spotify token fetch failed: ${res.status}`);
+  const data = await res.json() as { accessToken: string };
+  return data.accessToken;
+}
+
+interface SpotifyTrack {
+  name: string;
+  artists: Array<{ name: string }>;
+}
+
+async function getPlaylistTracks(playlistId: string, token: string): Promise<SpotifyTrack[]> {
+  const tracks: SpotifyTrack[] = [];
+  let url: string | null =
+    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?fields=next,items(track(name,artists))&limit=50`;
+
+  while (url) {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Spotify API error: ${res.status}`);
+    const data = await res.json() as {
+      items: Array<{ track: SpotifyTrack | null }>;
+      next: string | null;
+    };
+    for (const item of data.items) {
+      if (item.track) tracks.push(item.track);
+    }
+    url = data.next;
+  }
+  return tracks;
+}
+
 export async function downloadSpotifyTrack(
   spotifyUrl: string,
   opts: { onProgress?: (pct: number) => void; onStatus?: (msg: string) => void },
@@ -155,24 +255,26 @@ export async function downloadSpotifyTrack(
   opts.onStatus?.("🔍 در حال دریافت اطلاعات آهنگ از Spotify...");
   const info = await getSpotifyTrackInfo(spotifyUrl);
   const searchQuery = `ytsearch1:${info.title} ${info.author_name} official audio`;
-  logger.info({ title: info.title, artist: info.author_name }, "Spotify track info fetched, searching YouTube");
+  logger.info({ title: info.title, artist: info.author_name }, "Spotify track info fetched");
 
   opts.onStatus?.(`🎵 یافت شد: <b>${info.title}</b> — ${info.author_name}\n⬇️ در حال دانلود...`);
 
   const uid = randomUUID();
-  const outputPath = join(config.downloadDir, `${uid}.%(ext)s`);
-  const finalPath = join(config.downloadDir, `${uid}.mp3`);
+  const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
 
   const args = [
-    searchQuery, "-o", outputPath,
+    searchQuery, "-o", outputTemplate,
     "--no-warnings", "--restrict-filenames", "--no-playlist",
     "-x", "--audio-format", "mp3", "--audio-quality", "0",
   ];
 
   await execDownload(dl, args, opts.onProgress);
 
-  const fileSizeMb = getFileSizeMb(finalPath);
-  return { filePath: finalPath, title: `${info.title} — ${info.author_name}`, fileSizeMb };
+  const filePath = findDownloadedFile(uid);
+  if (!filePath) throw new Error("yt-dlp completed but no output file found for Spotify track");
+
+  const fileSizeMb = getFileSizeMb(filePath);
+  return { filePath, title: `${info.title} — ${info.author_name}`, fileSizeMb };
 }
 
 export async function downloadSpotifyPlaylist(
@@ -186,58 +288,52 @@ export async function downloadSpotifyPlaylist(
   ensureDownloadDir();
   const dl = await getYtDlp();
 
-  opts.onStatus?.("📋 در حال دریافت اطلاعات پلی‌لیست...");
+  opts.onStatus?.("📋 در حال دریافت اطلاعات پلی‌لیست از Spotify...");
 
-  let playlistTitle = "پلی‌لیست";
-  try {
-    const oEmbed = await getSpotifyTrackInfo(playlistUrl);
-    playlistTitle = oEmbed.title;
-  } catch { }
+  // Extract playlist ID from URL
+  const idMatch = playlistUrl.match(/playlist\/([A-Za-z0-9]+)/);
+  if (!idMatch) throw new Error("Could not extract Spotify playlist ID from URL");
+  const playlistId = idMatch[1];
 
-  // Use yt-dlp to extract playlist metadata from Spotify
-  // Fall back: treat playlist as a collection of tracks via flat-playlist
-  opts.onStatus?.(`🎵 پلی‌لیست: <b>${playlistTitle}</b>\n⏳ در حال آماده‌سازی...`);
+  // Get anonymous token + playlist tracks
+  const token = await getSpotifyAnonymousToken();
+  const tracks = await getPlaylistTracks(playlistId, token);
 
-  const uid = randomUUID();
-  const outputPath = join(config.downloadDir, `${uid}-%(playlist_index)s.%(ext)s`);
+  if (tracks.length === 0) throw new Error("No tracks found in Spotify playlist");
 
-  const args = [
-    playlistUrl, "-o", outputPath,
-    "--no-warnings", "--restrict-filenames",
-    "-x", "--audio-format", "mp3", "--audio-quality", "0",
-    "--yes-playlist",
-    "--ignore-errors",
-  ];
+  logger.info({ playlistId, trackCount: tracks.length }, "Spotify playlist tracks fetched");
+  opts.onStatus?.(`📋 تعداد آهنگ‌ها: <b>${tracks.length}</b>\n⬇️ شروع دانلود...`);
 
-  // Track completed files
-  const completedFiles: string[] = [];
-  let trackCount = 0;
+  for (let i = 0; i < tracks.length; i++) {
+    const track = tracks[i];
+    const artistName = track.artists.map((a) => a.name).join(", ");
+    const searchQuery = `ytsearch1:${track.name} ${artistName} audio`;
+    const title = `${track.name} — ${artistName}`;
 
-  await new Promise<void>((resolve, reject) => {
-    const proc = dl.exec(args);
-    proc.on("ytDlpEvent", (eventType: string, eventData: string) => {
-      if (eventType === "download" && eventData.includes("Downloading item")) {
-        const match = eventData.match(/Downloading item (\d+) of (\d+)/);
-        if (match) {
-          trackCount = Number(match[2]);
-          const current = Number(match[1]);
-          opts.onStatus?.(`⬇️ دانلود آهنگ ${current} از ${trackCount}...`);
-        }
+    opts.onStatus?.(`⬇️ در حال دانلود آهنگ ${i + 1} از ${tracks.length}: ${track.name}`);
+
+    try {
+      const uid = randomUUID();
+      const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
+
+      const args = [
+        searchQuery, "-o", outputTemplate,
+        "--no-warnings", "--restrict-filenames", "--no-playlist",
+        "-x", "--audio-format", "mp3", "--audio-quality", "0",
+      ];
+
+      await execDownload(dl, args, undefined);
+
+      const filePath = findDownloadedFile(uid);
+      if (!filePath) {
+        logger.warn({ track: track.name }, "No file found after download, skipping");
+        continue;
       }
-    });
-    proc.on("error", reject);
-    proc.on("close", () => resolve());
-  });
 
-  // Find downloaded files
-  const { readdirSync } = await import("fs");
-  const files = readdirSync(config.downloadDir)
-    .filter(f => f.startsWith(uid) && f.endsWith(".mp3"))
-    .sort();
-
-  for (let i = 0; i < files.length; i++) {
-    const filePath = join(config.downloadDir, files[i]);
-    const fileSizeMb = getFileSizeMb(filePath);
-    await opts.onTrackDone?.({ filePath, title: `آهنگ ${i + 1}`, fileSizeMb }, i + 1, files.length);
+      const fileSizeMb = getFileSizeMb(filePath);
+      await opts.onTrackDone?.({ filePath, title, fileSizeMb }, i + 1, tracks.length);
+    } catch (err) {
+      logger.warn({ err, track: track.name }, "Failed to download track, skipping");
+    }
   }
 }

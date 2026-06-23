@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { BotContext } from "../bot.js";
 import { downloadMedia } from "../utils/downloader.js";
-import { deleteFile, getFileSizeMb } from "../utils/fileUtils.js";
+import { scheduleFileDeletion, getFileSizeMb } from "../utils/fileUtils.js";
 import { logger } from "../utils/logger.js";
 import { config } from "../config.js";
 import { createReadStream } from "fs";
@@ -17,9 +17,9 @@ const FORMAT_LABEL: Record<string, string> = {
 
 const FORMAT_FALLBACK: Record<string, string | null> = {
   mp4_1080: "mp4_720",
-  mp4_720: "mp4_360",
-  mp4_360: "mp3",
-  mp3: null,
+  mp4_720:  "mp4_360",
+  mp4_360:  "mp3",
+  mp3:      null,
 };
 
 export function registerYouTubeHandler(bot: Bot<BotContext>): void {
@@ -45,7 +45,6 @@ async function tryDownload(
   attempt = 1,
 ): Promise<void> {
   const label = FORMAT_LABEL[format] ?? format;
-  const isVideo = format !== "mp3";
 
   await ctx.editMessageText(
     `▶️ <b>YouTube — در حال دانلود</b>\nفرمت: ${label}${attempt > 1 ? ` (تلاش ${attempt})` : ""}\n\n⏳ لطفاً صبر کنید...`,
@@ -73,27 +72,6 @@ async function tryDownload(
       },
     });
 
-    const fileSizeMb = getFileSizeMb(result.filePath);
-
-    // File too large — auto-fallback to lower quality
-    if (fileSizeMb > config.maxFileSizeMb) {
-      deleteFile(result.filePath);
-      const fallbackFormat = FORMAT_FALLBACK[format];
-      if (fallbackFormat) {
-        await ctx.editMessageText(
-          `⚠️ <b>کیفیت ${label} خیلی بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\n🔄 در حال تلاش با کیفیت پایین‌تر (${FORMAT_LABEL[fallbackFormat]})...`,
-          { parse_mode: "HTML" },
-        );
-        return tryDownload(ctx, url, fallbackFormat, id, attempt + 1);
-      } else {
-        await ctx.editMessageText(
-          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\nحتی کیفیت MP3 هم از حد مجاز بیشتر است.`,
-          { parse_mode: "HTML" },
-        );
-        return;
-      }
-    }
-
     await ctx.editMessageText(`📤 <b>در حال ارسال فایل...</b>`, { parse_mode: "HTML" });
 
     const file = new InputFile(createReadStream(result.filePath), basename(result.filePath));
@@ -112,23 +90,32 @@ async function tryDownload(
     }
 
     await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
-    deleteFile(result.filePath);
-    logger.info({ url, format, fileSizeMb }, "YouTube download sent");
+    scheduleFileDeletion(result.filePath, 120_000);
+    logger.info({ url, format, fileSizeMb: result.fileSizeMb }, "YouTube download sent");
   } catch (err: any) {
-    const errMsg = err?.message ?? "";
-    logger.error({ err, url, format }, "YouTube download failed");
+    // File too large — auto-fallback to lower quality
+    if (err?.code === "FILE_TOO_LARGE") {
+      const fileSizeMb: number = err.fileSizeMb ?? 0;
+      const filePath: string | undefined = err.filePath;
+      if (filePath) scheduleFileDeletion(filePath, 5_000);
 
-    // yt-dlp max-filesize error
-    if (errMsg.includes("max-filesize") || errMsg.includes("File is larger")) {
       const fallbackFormat = FORMAT_FALLBACK[format];
       if (fallbackFormat) {
         await ctx.editMessageText(
-          `⚠️ <b>کیفیت ${label} بیش از ۵۰MB است</b>\n\n🔄 در حال تلاش با کیفیت پایین‌تر (${FORMAT_LABEL[fallbackFormat]})...`,
+          `⚠️ <b>${label} خیلی بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\n🔄 در حال تلاش با ${FORMAT_LABEL[fallbackFormat]}...`,
           { parse_mode: "HTML" },
         );
         return tryDownload(ctx, url, fallbackFormat, id, attempt + 1);
+      } else {
+        await ctx.editMessageText(
+          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\nحتی MP3 هم از حد مجاز بیشتر است.`,
+          { parse_mode: "HTML" },
+        );
+        return;
       }
     }
+
+    logger.error({ err, url, format }, "YouTube download failed");
 
     const qualityKeyboard = new InlineKeyboard()
       .text("🎵 MP3", `yt:mp3:${id}`)
@@ -137,7 +124,7 @@ async function tryDownload(
       .text("📹 720p", `yt:mp4_720:${id}`);
 
     await ctx.editMessageText(
-      `❌ <b>خطا در دانلود</b>\n\nممکن است لینک معتبر نباشد یا ویدئو محدودیت داشته باشد.\nکیفیت دیگری انتخاب کنید:`,
+      `❌ <b>خطا در دانلود</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nکیفیت دیگری انتخاب کنید:`,
       { parse_mode: "HTML", reply_markup: qualityKeyboard },
     );
   }

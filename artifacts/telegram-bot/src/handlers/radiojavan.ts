@@ -1,7 +1,7 @@
 import { Bot, InputFile, InlineKeyboard } from "grammy";
 import { BotContext } from "../bot.js";
-import { downloadMedia } from "../utils/downloader.js";
-import { deleteFile, getFileSizeMb } from "../utils/fileUtils.js";
+import { downloadMedia, resolveRjUrl } from "../utils/downloader.js";
+import { scheduleFileDeletion, getFileSizeMb } from "../utils/fileUtils.js";
 import { logger } from "../utils/logger.js";
 import { config } from "../config.js";
 import { createReadStream } from "fs";
@@ -13,14 +13,29 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
   bot.callbackQuery(/^rj:(mp3|video):([0-9a-f]{8})$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     const [, format, id] = ctx.match;
-    const url = getUrl(id);
+    const rawUrl = getUrl(id);
 
-    if (!url) {
+    if (!rawUrl) {
       await ctx.editMessageText("⌛ این لینک منقضی شده. لطفاً دوباره لینک را ارسال کنید.", { parse_mode: "HTML" });
       return;
     }
 
     const label = format === "mp3" ? "🎵 MP3" : "📹 ویدئو";
+
+    await ctx.editMessageText(
+      `📻 <b>Radio Javan — در حال پردازش</b>\nفرمت: ${label}\n\n🔗 در حال بررسی لینک...`,
+      { parse_mode: "HTML" },
+    );
+
+    // Resolve rj.app short links → full radiojavan.com URL
+    let url: string;
+    try {
+      url = await resolveRjUrl(rawUrl);
+      logger.info({ rawUrl, url }, "RJ URL resolved");
+    } catch (err) {
+      logger.warn({ err, rawUrl }, "Could not resolve RJ URL, using raw");
+      url = rawUrl;
+    }
 
     await ctx.editMessageText(
       `📻 <b>Radio Javan — در حال دانلود</b>\nفرمت: ${label}\n\n⏳ لطفاً صبر کنید...`,
@@ -48,16 +63,6 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
         },
       });
 
-      const fileSizeMb = getFileSizeMb(result.filePath);
-      if (fileSizeMb > config.maxFileSizeMb) {
-        await ctx.editMessageText(
-          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\nحداکثر: ${config.maxFileSizeMb} MB`,
-          { parse_mode: "HTML" },
-        );
-        deleteFile(result.filePath);
-        return;
-      }
-
       await ctx.editMessageText(`📤 <b>در حال ارسال...</b>`, { parse_mode: "HTML" });
       const file = new InputFile(createReadStream(result.filePath), basename(result.filePath));
 
@@ -75,12 +80,12 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
       }
 
       await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
-      deleteFile(result.filePath);
-      logger.info({ url, format, fileSizeMb }, "RadioJavan download sent");
-    } catch (err) {
-      logger.error({ err, url }, "RadioJavan download failed");
+      scheduleFileDeletion(result.filePath, 120_000);
+      logger.info({ url, format, fileSizeMb: result.fileSizeMb }, "RadioJavan download sent");
+    } catch (err: any) {
+      logger.error({ err, url, rawUrl }, "RadioJavan download failed");
       await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Radio Javan</b>\n\nلطفاً لینک را بررسی کنید و مجدداً تلاش نمایید.`,
+        `❌ <b>خطا در دانلود از Radio Javan</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً لینک را بررسی کنید.`,
         { parse_mode: "HTML" },
       );
     }
@@ -89,7 +94,7 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
 
 export function buildRadioJavanKeyboard(url: string): InlineKeyboard {
   const id = storeUrl(url);
-  // For rj.app short links we don't know the type, show both buttons
+  // For rj.app or video links, show both; for mp3-only links just show MP3
   if (isRjAppLink(url) || isRadioJavanVideo(url)) {
     return new InlineKeyboard()
       .text("🎵 دانلود MP3", `rj:mp3:${id}`)

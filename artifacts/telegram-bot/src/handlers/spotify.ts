@@ -1,7 +1,7 @@
 import { Bot, InputFile, InlineKeyboard } from "grammy";
 import { BotContext } from "../bot.js";
 import { downloadSpotifyTrack, downloadSpotifyPlaylist } from "../utils/downloader.js";
-import { deleteFile, getFileSizeMb } from "../utils/fileUtils.js";
+import { scheduleFileDeletion, getFileSizeMb } from "../utils/fileUtils.js";
 import { logger } from "../utils/logger.js";
 import { config } from "../config.js";
 import { createReadStream } from "fs";
@@ -47,13 +47,12 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
         },
       });
 
-      const fileSizeMb = getFileSizeMb(result.filePath);
-      if (fileSizeMb > config.maxFileSizeMb) {
+      if (result.fileSizeMb > config.maxFileSizeMb) {
         await ctx.editMessageText(
-          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\nحداکثر مجاز: ${config.maxFileSizeMb} MB`,
+          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${result.fileSizeMb.toFixed(1)} MB)`,
           { parse_mode: "HTML" },
         );
-        deleteFile(result.filePath);
+        scheduleFileDeletion(result.filePath, 5_000);
         return;
       }
 
@@ -66,12 +65,12 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
       });
 
       await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
-      deleteFile(result.filePath);
-      logger.info({ url, fileSizeMb }, "Spotify track sent");
-    } catch (err) {
+      scheduleFileDeletion(result.filePath, 120_000);
+      logger.info({ url, fileSizeMb: result.fileSizeMb }, "Spotify track sent");
+    } catch (err: any) {
       logger.error({ err, url }, "Spotify download failed");
       await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Spotify</b>\n\nلطفاً مجدداً تلاش کنید.`,
+        `❌ <b>خطا در دانلود از Spotify</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
         { parse_mode: "HTML" },
       );
     }
@@ -91,7 +90,6 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
     await ctx.editMessageText(`📋 <b>دانلود پلی‌لیست Spotify</b>\n\n🔍 در حال پردازش...`, { parse_mode: "HTML" });
 
     let sentCount = 0;
-    let totalCount = 0;
 
     try {
       await downloadSpotifyPlaylist(url, {
@@ -99,9 +97,8 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
           try { await ctx.editMessageText(`📋 <b>پلی‌لیست Spotify</b>\n\n${msg}`, { parse_mode: "HTML" }); } catch { }
         },
         onTrackDone: async (result, index, total) => {
-          totalCount = total;
           if (result.fileSizeMb > config.maxFileSizeMb) {
-            deleteFile(result.filePath);
+            scheduleFileDeletion(result.filePath, 5_000);
             return;
           }
           try {
@@ -116,19 +113,21 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
               parse_mode: "HTML",
             });
             sentCount++;
-          } catch { }
-          deleteFile(result.filePath);
+          } catch (sendErr) {
+            logger.warn({ sendErr, index }, "Failed to send playlist track");
+          }
+          scheduleFileDeletion(result.filePath, 120_000);
         },
       });
 
       await ctx.editMessageText(
-        `✅ <b>پلی‌لیست کامل شد!</b>\n\n${sentCount} آهنگ ارسال شد.`,
+        `✅ <b>پلی‌لیست کامل شد!</b>\n\n${sentCount} آهنگ با موفقیت ارسال شد.`,
         { parse_mode: "HTML" },
       );
-    } catch (err) {
+    } catch (err: any) {
       logger.error({ err, url }, "Spotify playlist download failed");
       await ctx.editMessageText(
-        `❌ <b>خطا در دانلود پلی‌لیست</b>\n\nلطفاً مجدداً تلاش کنید.`,
+        `❌ <b>خطا در دانلود پلی‌لیست</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
         { parse_mode: "HTML" },
       );
     }
