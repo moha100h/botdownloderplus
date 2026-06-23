@@ -1,7 +1,7 @@
 import { Bot, InputFile, InlineKeyboard } from "grammy";
 import { BotContext } from "../bot.js";
 import { downloadMedia } from "../utils/downloader.js";
-import { deleteFile, getFileSizeMb } from "../utils/fileUtils.js";
+import { scheduleFileDeletion, getFileSizeMb } from "../utils/fileUtils.js";
 import { logger } from "../utils/logger.js";
 import { config } from "../config.js";
 import { createReadStream } from "fs";
@@ -27,6 +27,7 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
     );
 
     let lastUpdateTime = Date.now();
+    let downloadedPath: string | null = null;
 
     try {
       const result = await downloadMedia({
@@ -46,6 +47,7 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
           } catch { }
         },
       });
+      downloadedPath = result.filePath;
 
       const fileSizeMb = getFileSizeMb(result.filePath);
       if (fileSizeMb > config.maxFileSizeMb) {
@@ -53,7 +55,6 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
           `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\nمحدودیت: ${config.maxFileSizeMb} MB`,
           { parse_mode: "HTML" },
         );
-        deleteFile(result.filePath);
         return;
       }
 
@@ -74,7 +75,6 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
       }
 
       await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
-      deleteFile(result.filePath);
       logger.info({ url, format, fileSizeMb }, "Instagram download sent");
     } catch (err) {
       logger.error({ err, url }, "Instagram download failed");
@@ -82,6 +82,9 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
         `❌ <b>خطا در دانلود از Instagram</b>\n\nممکن است پست خصوصی باشد یا لینک منقضی شده باشد.`,
         { parse_mode: "HTML" },
       );
+    } finally {
+      // Always queue cleanup of the downloaded file (auto-delete after 120s)
+      if (downloadedPath) scheduleFileDeletion(downloadedPath, 120_000);
     }
   });
 }

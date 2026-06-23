@@ -1,5 +1,6 @@
 import YTDlpWrapModule from "yt-dlp-wrap";
 import { join } from "path";
+import { existsSync } from "fs";
 import { randomUUID } from "crypto";
 import { config } from "../config.js";
 import { ensureDownloadDir, getFileSizeMb, findDownloadedFile } from "./fileUtils.js";
@@ -14,6 +15,14 @@ let ytDlp: InstanceType<typeof YTDlpWrap> | null = null;
 export async function getYtDlp(): Promise<InstanceType<typeof YTDlpWrap>> {
   if (!ytDlp) {
     const binaryPath = join(config.downloadDir, ".yt-dlp-bin");
+
+    // Reuse an already-downloaded binary (avoids GitHub rate-limit failures)
+    if (existsSync(binaryPath)) {
+      ytDlp = new YTDlpWrap(binaryPath);
+      logger.info({ binaryPath }, "Using existing yt-dlp binary");
+      return ytDlp;
+    }
+
     ytDlp = new YTDlpWrap(binaryPath);
     try {
       await (YTDlpWrap as any).downloadFromGithub(binaryPath);
@@ -155,94 +164,82 @@ export async function downloadMedia(opts: DownloadOptions): Promise<DownloadResu
   return { filePath, title, fileSizeMb };
 }
 
-// ─── Radio Javan: resolve rj.app short links ─────────────────────────────────
+// ─── Spotify via embed-page scrape + YouTube Search ──────────────────────────
+
+interface SpotifyTrackMeta {
+  name: string;
+  artist: string;
+}
 
 /**
- * rj.app/m/XXX  →  play.radiojavan.com/song/SLUG  →  radiojavan.com/mp3s/mp3/SLUG
- * rj.app/v/XXX  →  play.radiojavan.com/video/SLUG →  radiojavan.com/videos/video/SLUG
+ * Scrape the Spotify embed page for an entity (track / playlist / album).
+ * The embed page ships a __NEXT_DATA__ JSON blob containing the full track list
+ * with title + subtitle (artists). This needs no API token.
  */
-export async function resolveRjUrl(url: string): Promise<string> {
-  if (!url.includes("rj.app")) return url;
-
-  try {
-    // Follow redirect without downloading body
-    const res = await fetch(url, { method: "HEAD", redirect: "follow" });
-    const finalUrl = res.url;
-    logger.info({ original: url, resolved: finalUrl }, "Resolved rj.app redirect");
-
-    // Convert play.radiojavan.com/song/SLUG → radiojavan.com/mp3s/mp3/SLUG
-    const songMatch = finalUrl.match(/play\.radiojavan\.com\/song\/([^?&#]+)/);
-    if (songMatch) return `https://www.radiojavan.com/mp3s/mp3/${songMatch[1]}`;
-
-    const videoMatch = finalUrl.match(/play\.radiojavan\.com\/video\/([^?&#]+)/);
-    if (videoMatch) return `https://www.radiojavan.com/videos/video/${videoMatch[1]}`;
-
-    const podcastMatch = finalUrl.match(/play\.radiojavan\.com\/podcast\/([^?&#]+)/);
-    if (podcastMatch) return `https://www.radiojavan.com/podcasts/podcast/${podcastMatch[1]}`;
-
-    // Fallback: return original resolved URL
-    return finalUrl;
-  } catch (err) {
-    logger.warn({ err, url }, "Could not resolve rj.app URL, using original");
-    return url;
-  }
-}
-
-// ─── Spotify via oEmbed + YouTube Search ─────────────────────────────────────
-
-interface SpotifyOEmbed {
-  title: string;
-  author_name: string;
-  thumbnail_url?: string;
-}
-
-async function getSpotifyTrackInfo(spotifyUrl: string): Promise<SpotifyOEmbed> {
-  const res = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(spotifyUrl)}`);
-  if (!res.ok) throw new Error(`Spotify oEmbed failed: ${res.status}`);
-  return res.json() as Promise<SpotifyOEmbed>;
-}
-
-async function getSpotifyAnonymousToken(): Promise<string> {
-  const res = await fetch(
-    "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
-    {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Cookie": "sp_t=1",
-      },
-    },
-  );
-  if (!res.ok) throw new Error(`Spotify token fetch failed: ${res.status}`);
-  const data = await res.json() as { accessToken: string };
-  return data.accessToken;
-}
-
-interface SpotifyTrack {
+async function fetchSpotifyEmbed(kind: string, id: string): Promise<{
   name: string;
-  artists: Array<{ name: string }>;
+  type: string;
+  tracks: SpotifyTrackMeta[];
+}> {
+  const res = await fetch(`https://open.spotify.com/embed/${kind}/${id}`, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    },
+  });
+  if (!res.ok) throw new Error(`Spotify embed fetch failed: ${res.status}`);
+  const html = await res.text();
+
+  const match = html.match(
+    /<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/s,
+  );
+  if (!match) throw new Error("Could not find Spotify embed data");
+
+  const data = JSON.parse(match[1]);
+  const entity = data?.props?.pageProps?.state?.data?.entity;
+  if (!entity) throw new Error("Could not parse Spotify entity data");
+
+  const rawTracks: any[] = entity.trackList ?? [];
+
+  let tracks: SpotifyTrackMeta[];
+  if (rawTracks.length > 0) {
+    // playlist / album → trackList[].title + .subtitle
+    tracks = rawTracks.map((t) => ({
+      name: t.title ?? "",
+      artist: t.subtitle ?? "",
+    }));
+  } else {
+    // single track → entity.name + entity.artists[].name
+    const artistNames: string = Array.isArray(entity.artists)
+      ? entity.artists.map((a: { name: string }) => a.name).join(", ")
+      : (entity.subtitle ?? "");
+    tracks = [{ name: entity.name ?? "", artist: artistNames }];
+  }
+
+  return { name: entity.name ?? "", type: entity.type ?? kind, tracks };
 }
 
-async function getPlaylistTracks(playlistId: string, token: string): Promise<SpotifyTrack[]> {
-  const tracks: SpotifyTrack[] = [];
-  let url: string | null =
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?fields=next,items(track(name,artists))&limit=50`;
+function parseSpotifyUrl(url: string): { kind: string; id: string } {
+  const m = url.match(/spotify\.com\/(track|playlist|album|episode)\/([A-Za-z0-9]+)/);
+  if (!m) throw new Error("Could not parse Spotify URL");
+  return { kind: m[1], id: m[2] };
+}
 
-  while (url) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) throw new Error(`Spotify API error: ${res.status}`);
-    const data = await res.json() as {
-      items: Array<{ track: SpotifyTrack | null }>;
-      next: string | null;
-    };
-    for (const item of data.items) {
-      if (item.track) tracks.push(item.track);
-    }
-    url = data.next;
-  }
-  return tracks;
+async function downloadTrackFromYouTube(
+  dl: InstanceType<typeof YTDlpWrap>,
+  query: string,
+  onProgress?: (pct: number) => void,
+): Promise<string | null> {
+  const uid = randomUUID();
+  const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
+  const args = [
+    `ytsearch1:${query}`, "-o", outputTemplate,
+    "--no-warnings", "--restrict-filenames", "--no-playlist",
+    "-x", "--audio-format", "mp3", "--audio-quality", "0",
+    "--embed-thumbnail", "--embed-metadata",
+  ];
+  await execDownload(dl, args, onProgress);
+  return findDownloadedFile(uid);
 }
 
 export async function downloadSpotifyTrack(
@@ -253,28 +250,27 @@ export async function downloadSpotifyTrack(
   const dl = await getYtDlp();
 
   opts.onStatus?.("🔍 در حال دریافت اطلاعات آهنگ از Spotify...");
-  const info = await getSpotifyTrackInfo(spotifyUrl);
-  const searchQuery = `ytsearch1:${info.title} ${info.author_name} official audio`;
-  logger.info({ title: info.title, artist: info.author_name }, "Spotify track info fetched");
+  const { kind, id } = parseSpotifyUrl(spotifyUrl);
+  const embed = await fetchSpotifyEmbed(kind, id);
 
-  opts.onStatus?.(`🎵 یافت شد: <b>${info.title}</b> — ${info.author_name}\n⬇️ در حال دانلود...`);
+  // For a single track embed, the track itself is in trackList[0]; fall back to entity name.
+  const first = embed.tracks[0];
+  const trackName = first?.name || embed.name;
+  const artist = first?.artist || "";
+  const title = artist ? `${trackName} — ${artist}` : trackName;
 
-  const uid = randomUUID();
-  const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
+  logger.info({ trackName, artist }, "Spotify track meta fetched");
+  opts.onStatus?.(`🎵 یافت شد: <b>${trackName}</b>${artist ? ` — ${artist}` : ""}\n⬇️ در حال دانلود...`);
 
-  const args = [
-    searchQuery, "-o", outputTemplate,
-    "--no-warnings", "--restrict-filenames", "--no-playlist",
-    "-x", "--audio-format", "mp3", "--audio-quality", "0",
-  ];
-
-  await execDownload(dl, args, opts.onProgress);
-
-  const filePath = findDownloadedFile(uid);
-  if (!filePath) throw new Error("yt-dlp completed but no output file found for Spotify track");
+  const filePath = await downloadTrackFromYouTube(
+    dl,
+    `${trackName} ${artist} audio`,
+    opts.onProgress,
+  );
+  if (!filePath) throw new Error("دانلود از یوتیوب ناموفق بود (فایلی پیدا نشد)");
 
   const fileSizeMb = getFileSizeMb(filePath);
-  return { filePath, title: `${info.title} — ${info.author_name}`, fileSizeMb };
+  return { filePath, title, fileSizeMb };
 }
 
 export async function downloadSpotifyPlaylist(
@@ -290,46 +286,27 @@ export async function downloadSpotifyPlaylist(
 
   opts.onStatus?.("📋 در حال دریافت اطلاعات پلی‌لیست از Spotify...");
 
-  // Extract playlist ID from URL
-  const idMatch = playlistUrl.match(/playlist\/([A-Za-z0-9]+)/);
-  if (!idMatch) throw new Error("Could not extract Spotify playlist ID from URL");
-  const playlistId = idMatch[1];
+  const { kind, id } = parseSpotifyUrl(playlistUrl);
+  const embed = await fetchSpotifyEmbed(kind, id);
+  const tracks = embed.tracks;
 
-  // Get anonymous token + playlist tracks
-  const token = await getSpotifyAnonymousToken();
-  const tracks = await getPlaylistTracks(playlistId, token);
+  if (tracks.length === 0) throw new Error("هیچ آهنگی در پلی‌لیست یافت نشد");
 
-  if (tracks.length === 0) throw new Error("No tracks found in Spotify playlist");
-
-  logger.info({ playlistId, trackCount: tracks.length }, "Spotify playlist tracks fetched");
-  opts.onStatus?.(`📋 تعداد آهنگ‌ها: <b>${tracks.length}</b>\n⬇️ شروع دانلود...`);
+  logger.info({ id, trackCount: tracks.length }, "Spotify playlist tracks fetched");
+  opts.onStatus?.(`📋 <b>${embed.name}</b>\nتعداد آهنگ‌ها: <b>${tracks.length}</b>\n⬇️ شروع دانلود...`);
 
   for (let i = 0; i < tracks.length; i++) {
     const track = tracks[i];
-    const artistName = track.artists.map((a) => a.name).join(", ");
-    const searchQuery = `ytsearch1:${track.name} ${artistName} audio`;
-    const title = `${track.name} — ${artistName}`;
+    const title = track.artist ? `${track.name} — ${track.artist}` : track.name;
 
-    opts.onStatus?.(`⬇️ در حال دانلود آهنگ ${i + 1} از ${tracks.length}: ${track.name}`);
+    opts.onStatus?.(`⬇️ در حال دانلود آهنگ ${i + 1} از ${tracks.length}:\n${track.name}`);
 
     try {
-      const uid = randomUUID();
-      const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
-
-      const args = [
-        searchQuery, "-o", outputTemplate,
-        "--no-warnings", "--restrict-filenames", "--no-playlist",
-        "-x", "--audio-format", "mp3", "--audio-quality", "0",
-      ];
-
-      await execDownload(dl, args, undefined);
-
-      const filePath = findDownloadedFile(uid);
+      const filePath = await downloadTrackFromYouTube(dl, `${track.name} ${track.artist} audio`);
       if (!filePath) {
         logger.warn({ track: track.name }, "No file found after download, skipping");
         continue;
       }
-
       const fileSizeMb = getFileSizeMb(filePath);
       await opts.onTrackDone?.({ filePath, title, fileSizeMb }, i + 1, tracks.length);
     } catch (err) {

@@ -52,6 +52,7 @@ async function tryDownload(
   );
 
   let lastUpdateTime = Date.now();
+  let downloadedPath: string | null = null;
 
   try {
     const result = await downloadMedia({
@@ -71,6 +72,7 @@ async function tryDownload(
         } catch { }
       },
     });
+    downloadedPath = result.filePath;
 
     await ctx.editMessageText(`📤 <b>در حال ارسال فایل...</b>`, { parse_mode: "HTML" });
 
@@ -90,7 +92,6 @@ async function tryDownload(
     }
 
     await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
-    scheduleFileDeletion(result.filePath, 120_000);
     logger.info({ url, format, fileSizeMb: result.fileSizeMb }, "YouTube download sent");
   } catch (err: any) {
     // File too large — auto-fallback to lower quality
@@ -127,6 +128,9 @@ async function tryDownload(
       `❌ <b>خطا در دانلود</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nکیفیت دیگری انتخاب کنید:`,
       { parse_mode: "HTML", reply_markup: qualityKeyboard },
     );
+  } finally {
+    // Always queue cleanup of the sent/downloaded file (auto-delete after 120s)
+    if (downloadedPath) scheduleFileDeletion(downloadedPath, 120_000);
   }
 }
 

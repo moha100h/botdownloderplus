@@ -3,10 +3,10 @@ name: Telegram bot stack quirks
 description: Non-obvious issues in the Grammy+yt-dlp Telegram downloader bot project
 ---
 
-## Spotify DRM — use oEmbed + YouTube search
-yt-dlp refuses all Spotify URLs with `[DRM] The requested site is known to use DRM protection`.
-**Fix:** Fetch `https://open.spotify.com/oembed?url={spotifyUrl}` (no auth needed) to get title+artist, then pass `ytsearch1:{title} {artist} official audio` to yt-dlp.
-**Why:** Spotify streams are DRM-protected; yt-dlp won't ever support them directly.
+## Spotify DRM — scrape embed page + YouTube search
+yt-dlp refuses all Spotify URLs with `[DRM] The requested site is known to use DRM protection`. The old `get_access_token` token endpoint now returns 403 (dead).
+**Fix:** Fetch `https://open.spotify.com/embed/{kind}/{id}` and parse the `__NEXT_DATA__` JSON script tag → `props.pageProps.state.data.entity`. For **playlists/albums** the tracks are in `entity.trackList[]` (each has `title`=name, `subtitle`=artists). For a **single track** `trackList` is undefined — use `entity.name` (title) + `entity.artists[].name` (join with ", "). Then `ytsearch1:{name} {artist} audio` per track via yt-dlp.
+**Why:** Spotify streams are DRM-protected; yt-dlp won't ever support them directly. Single vs multi entities have different JSON shapes — handle both.
 
 ## Telegram callback_data 64-byte limit
 Inline keyboard buttons have a hard 64-byte limit on callback_data. Base64-encoding a full URL exceeds this.
@@ -27,3 +27,20 @@ In the compiled `dist/index.mjs`, `__dirname` resolves relative to `dist/`, not 
 
 ## rj.app short links
 Radio Javan uses `rj.app` as a short URL domain. Must add `/(?:https?:\/\/)?rj\.app\//` to the radiojavan platform patterns. For rj.app links, the media type (mp3 vs video) is unknown without resolving the redirect, so always show both download buttons.
+
+## Radio Javan download — direct API, not yt-dlp
+rj.app + radiojavan.com sit behind Cloudflare → 403 for yt-dlp/curl/node-fetch. **node fetch with `redirect:"follow"` does NOT follow rj.app redirects** (Cloudflare 403s the request, returns same URL).
+**Fix (resolve short link):** Extract code from `rj.app/{m|v}/CODE`, then call `https://play.radiojavan.com/api/short-link/{m|v}/CODE` with `redirect:"manual"` — returns 308 with a `Location` header pointing to `play.radiojavan.com/song/SLUG`.
+**Fix (download media):** Call `https://play.radiojavan.com/api/p/{mp3|video|podcast}?id=SLUG` → JSON with `link` + `hq_link` direct media URLs; stream the file directly (prefer `hq_link`).
+
+## Telegram bot 50MB upload hard limit
+Standard Telegram Bot API caps bot file uploads at 50MB. Many YouTube videos exceed this even at 360p. There is NO workaround within the standard Bot API. The YouTube handler auto-falls-back 1080→720→360→mp3 and reports the size when even mp3 is too big.
+**Only true fix for >50MB:** self-hosted Telegram Bot API server (2GB limit), which needs the user's `api_id`/`api_hash` + the `telegram-bot-api` binary. Do not promise >50MB video without this.
+
+## Downloaded-file cleanup must survive send failures
+Requirement: every sent file auto-deletes after 120s. **Rule:** schedule deletion in a `finally` block keyed off a `downloadedPath` variable, NOT only on the success path. If you only `scheduleFileDeletion` after a successful `replyWithVideo/Audio`, a send failure leaks the file until the periodic sweep (~1h).
+**Why:** Telegram sends throw on flaky network / oversize; the file is already on disk by then and must still be cleaned up.
+
+## yt-dlp binary reuse (GitHub rate limit)
+`YTDlpWrap.downloadFromGithub()` hits GitHub's unauthenticated rate limit (403) and on failure the init code fell back to a pathless `new YTDlpWrap()` = system yt-dlp (not installed) → all downloads break.
+**Fix:** In `getYtDlp()`, if the binary file already exists at `downloads/.yt-dlp-bin`, use it directly via `existsSync` and skip the GitHub download entirely.

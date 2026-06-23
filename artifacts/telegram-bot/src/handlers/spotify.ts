@@ -27,6 +27,7 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
     );
 
     let lastUpdateTime = Date.now();
+    let downloadedPath: string | null = null;
 
     try {
       const result = await downloadSpotifyTrack(url, {
@@ -46,13 +47,13 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
           } catch { }
         },
       });
+      downloadedPath = result.filePath;
 
       if (result.fileSizeMb > config.maxFileSizeMb) {
         await ctx.editMessageText(
           `⚠️ <b>فایل بیش از حد بزرگ است</b> (${result.fileSizeMb.toFixed(1)} MB)`,
           { parse_mode: "HTML" },
         );
-        scheduleFileDeletion(result.filePath, 5_000);
         return;
       }
 
@@ -65,7 +66,6 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
       });
 
       await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
-      scheduleFileDeletion(result.filePath, 120_000);
       logger.info({ url, fileSizeMb: result.fileSizeMb }, "Spotify track sent");
     } catch (err: any) {
       logger.error({ err, url }, "Spotify download failed");
@@ -73,6 +73,9 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
         `❌ <b>خطا در دانلود از Spotify</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
         { parse_mode: "HTML" },
       );
+    } finally {
+      // Always queue cleanup of the downloaded file (auto-delete after 120s)
+      if (downloadedPath) scheduleFileDeletion(downloadedPath, 120_000);
     }
   });
 
