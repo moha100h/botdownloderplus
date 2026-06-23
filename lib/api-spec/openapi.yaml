@@ -1,6 +1,5 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
   description: API specification
@@ -10,13 +9,14 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: Telegram bot management
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +24,71 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /bot/setup:
+    post:
+      operationId: setupBot
+      tags: [bot]
+      summary: Configure and start the Telegram bot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BotSetupRequest"
+      responses:
+        "200":
+          description: Bot set up and started successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotSetupResponse"
+        "400":
+          description: Invalid credentials or setup error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get current bot status
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the running bot
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotActionResponse"
+
+  /bot/restart:
+    post:
+      operationId: restartBot
+      tags: [bot]
+      summary: Restart the bot
+      responses:
+        "200":
+          description: Bot restarted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotActionResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +99,74 @@ components:
       required:
         - status
 
+    BotSetupRequest:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Telegram bot token from BotFather
+        adminId:
+          type: number
+          description: Numeric Telegram user ID of the admin
+        maxFileSizeMb:
+          type: number
+          description: Max file size in MB (default 50)
+        rateLimitRequests:
+          type: number
+          description: Max requests per minute per user (default 5)
+      required:
+        - token
+        - adminId
+
+    BotSetupResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        botUsername:
+          type: string
+        botId:
+          type: number
+        message:
+          type: string
+      required:
+        - success
+        - message
+
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        setupDone:
+          type: boolean
+        botUsername:
+          type: string
+        adminId:
+          type: number
+        pid:
+          type: number
+      required:
+        - running
+        - setupDone
+
+    BotActionResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+        - message
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        details:
+          type: string
+      required:
+        - error
