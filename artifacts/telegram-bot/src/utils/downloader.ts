@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { config } from "../config.js";
 import { ensureDownloadDir, getFileSizeMb, findDownloadedFile } from "./fileUtils.js";
 import { logger } from "./logger.js";
+import { CancelledError, isCancelledError } from "./cancellation.js";
 
 // yt-dlp-wrap is CJS; the actual class lives at .default in ESM context
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -49,6 +50,7 @@ export interface DownloadOptions {
   onProgress?: (percent: number) => void;
   onStatus?: (status: string) => void;
   maxFileSizeMb?: number;
+  signal?: AbortSignal;
 }
 
 function buildYtdlpArgs(
@@ -106,10 +108,24 @@ async function execDownload(
   dl: InstanceType<typeof YTDlpWrap>,
   args: string[],
   onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   let lastPercent = -1;
   await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new CancelledError());
+      return;
+    }
+
     const proc = dl.exec(args);
+
+    const onAbort = () => {
+      // yt-dlp-wrap exposes the underlying ChildProcess via .ytDlpProcess
+      try { (proc as any).ytDlpProcess?.kill("SIGKILL"); } catch { /* already exited */ }
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+
     proc.on("ytDlpEvent", (eventType: string, eventData: string) => {
       if (eventType === "download" && eventData.includes("%")) {
         const match = eventData.match(/(\d+(?:\.\d+)?)%/);
@@ -122,8 +138,15 @@ async function execDownload(
         }
       }
     });
-    proc.on("error", (err: Error) => reject(err));
-    proc.on("close", () => resolve());
+    proc.on("error", (err: Error) => {
+      cleanup();
+      reject(signal?.aborted ? new CancelledError() : err);
+    });
+    proc.on("close", () => {
+      cleanup();
+      if (signal?.aborted) reject(new CancelledError());
+      else resolve();
+    });
   });
 }
 
@@ -136,7 +159,7 @@ export async function downloadMedia(opts: DownloadOptions): Promise<DownloadResu
   const args = buildYtdlpArgs(opts.url, opts.format, outputTemplate);
   logger.debug({ args }, "Starting yt-dlp");
 
-  await execDownload(dl, args, opts.onProgress);
+  await execDownload(dl, args, opts.onProgress, opts.signal);
 
   // Find the actual output file — yt-dlp may produce .mp4, .webm, .mkv, etc.
   const filePath = findDownloadedFile(uid);
@@ -229,6 +252,7 @@ async function downloadTrackFromYouTube(
   dl: InstanceType<typeof YTDlpWrap>,
   query: string,
   onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const uid = randomUUID();
   const outputTemplate = join(config.downloadDir, `${uid}.%(ext)s`);
@@ -238,13 +262,13 @@ async function downloadTrackFromYouTube(
     "-x", "--audio-format", "mp3", "--audio-quality", "0",
     "--embed-thumbnail", "--embed-metadata",
   ];
-  await execDownload(dl, args, onProgress);
+  await execDownload(dl, args, onProgress, signal);
   return findDownloadedFile(uid);
 }
 
 export async function downloadSpotifyTrack(
   spotifyUrl: string,
-  opts: { onProgress?: (pct: number) => void; onStatus?: (msg: string) => void },
+  opts: { onProgress?: (pct: number) => void; onStatus?: (msg: string) => void; signal?: AbortSignal },
 ): Promise<DownloadResult> {
   ensureDownloadDir();
   const dl = await getYtDlp();
@@ -266,6 +290,7 @@ export async function downloadSpotifyTrack(
     dl,
     `${trackName} ${artist} audio`,
     opts.onProgress,
+    opts.signal,
   );
   if (!filePath) throw new Error("دانلود از یوتیوب ناموفق بود (فایلی پیدا نشد)");
 
@@ -279,6 +304,7 @@ export async function downloadSpotifyPlaylist(
     onProgress?: (pct: number) => void;
     onStatus?: (msg: string) => void;
     onTrackDone?: (result: DownloadResult, index: number, total: number) => Promise<void>;
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   ensureDownloadDir();
@@ -296,13 +322,24 @@ export async function downloadSpotifyPlaylist(
   opts.onStatus?.(`📋 <b>${embed.name}</b>\nتعداد آهنگ‌ها: <b>${tracks.length}</b>\n⬇️ شروع دانلود...`);
 
   for (let i = 0; i < tracks.length; i++) {
+    // Stop before starting the next track if the user cancelled.
+    if (opts.signal?.aborted) {
+      logger.info({ id, sentSoFar: i }, "Spotify playlist cancelled by user");
+      break;
+    }
+
     const track = tracks[i];
     const title = track.artist ? `${track.name} — ${track.artist}` : track.name;
 
     opts.onStatus?.(`⬇️ در حال دانلود آهنگ ${i + 1} از ${tracks.length}:\n${track.name}`);
 
     try {
-      const filePath = await downloadTrackFromYouTube(dl, `${track.name} ${track.artist} audio`);
+      const filePath = await downloadTrackFromYouTube(
+        dl,
+        `${track.name} ${track.artist} audio`,
+        undefined,
+        opts.signal,
+      );
       if (!filePath) {
         logger.warn({ track: track.name }, "No file found after download, skipping");
         continue;
@@ -310,6 +347,11 @@ export async function downloadSpotifyPlaylist(
       const fileSizeMb = getFileSizeMb(filePath);
       await opts.onTrackDone?.({ filePath, title, fileSizeMb }, i + 1, tracks.length);
     } catch (err) {
+      // A cancellation aborts the whole playlist, not just this track.
+      if (opts.signal?.aborted || isCancelledError(err)) {
+        logger.info({ id }, "Spotify playlist cancelled mid-track");
+        break;
+      }
       logger.warn({ err, track: track.name }, "Failed to download track, skipping");
     }
   }

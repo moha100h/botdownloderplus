@@ -8,6 +8,7 @@ import { createReadStream } from "fs";
 import { basename } from "path";
 import { isRadioJavanVideo, isRjAppLink } from "../utils/platform.js";
 import { storeUrl, getUrl } from "../utils/urlCache.js";
+import { createCancelJob, endCancelJob, cancelKeyboard, isCancelledError } from "../utils/cancellation.js";
 
 export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
   bot.callbackQuery(/^rj:(mp3|video):([0-9a-f]{8})$/, async (ctx) => {
@@ -21,14 +22,16 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
     }
 
     const label = format === "mp3" ? "🎵 MP3" : "📹 ویدئو";
-
-    await ctx.editMessageText(
-      `📻 <b>Radio Javan — در حال دانلود</b>\nفرمت: ${label}\n\n⏳ لطفاً صبر کنید...`,
-      { parse_mode: "HTML" },
-    );
+    const { jobId, signal } = createCancelJob();
+    const kb = cancelKeyboard(jobId);
 
     try {
-      const result = await downloadRadioJavan(rawUrl, format as "mp3" | "video");
+      await ctx.editMessageText(
+        `📻 <b>Radio Javan — در حال دانلود</b>\nفرمت: ${label}\n\n⏳ لطفاً صبر کنید...`,
+        { parse_mode: "HTML", reply_markup: kb },
+      );
+
+      const result = await downloadRadioJavan(rawUrl, format as "mp3" | "video", signal);
 
       if (result.fileSizeMb > config.maxFileSizeMb) {
         await ctx.editMessageText(
@@ -59,11 +62,17 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
       scheduleFileDeletion(result.filePath, 120_000);
       logger.info({ rawUrl, format, fileSizeMb: result.fileSizeMb }, "RadioJavan download sent");
     } catch (err: any) {
-      logger.error({ err, rawUrl }, "RadioJavan download failed");
-      await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Radio Javan</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً لینک را بررسی کنید.`,
-        { parse_mode: "HTML" },
-      );
+      if (isCancelledError(err)) {
+        await ctx.editMessageText(`🛑 <b>دانلود لغو شد.</b>`, { parse_mode: "HTML" });
+      } else {
+        logger.error({ err, rawUrl }, "RadioJavan download failed");
+        await ctx.editMessageText(
+          `❌ <b>خطا در دانلود از Radio Javan</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً لینک را بررسی کنید.`,
+          { parse_mode: "HTML" },
+        );
+      }
+    } finally {
+      endCancelJob(jobId);
     }
   });
 }

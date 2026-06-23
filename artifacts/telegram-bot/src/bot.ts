@@ -11,6 +11,7 @@ import { registerInstagramHandler } from "./handlers/instagram.js";
 import { registerRadioJavanHandler } from "./handlers/radiojavan.js";
 import { logger } from "./utils/logger.js";
 import { MAIN_KEYBOARD } from "./keyboard.js";
+import { cancelJob } from "./utils/cancellation.js";
 
 interface SessionData {
   pendingUrl?: string;
@@ -37,6 +38,16 @@ export function createBot(): Bot<BotContext> {
   registerAdminCommands(bot);
   registerStartCommand(bot);
   registerHelpCommand(bot);
+
+  // Cancel button — must be registered before download handlers so an
+  // in-flight download can be aborted via its inline "❌ لغو دانلود" button.
+  bot.callbackQuery(/^cancel:([0-9a-f]{8})$/, async (ctx) => {
+    const [, jobId] = ctx.match;
+    const ok = cancelJob(jobId);
+    await ctx.answerCallbackQuery({
+      text: ok ? "🛑 در حال لغو..." : "این عملیات دیگر فعال نیست",
+    });
+  });
 
   registerYouTubeHandler(bot);
   registerSpotifyHandler(bot);

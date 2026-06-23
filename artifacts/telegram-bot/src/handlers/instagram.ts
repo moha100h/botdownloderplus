@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { createReadStream } from "fs";
 import { basename } from "path";
 import { storeUrl, getUrl } from "../utils/urlCache.js";
+import { createCancelJob, endCancelJob, cancelKeyboard, isCancelledError } from "../utils/cancellation.js";
 
 export function registerInstagramHandler(bot: Bot<BotContext>): void {
   bot.callbackQuery(/^ig:(video|photo):([0-9a-f]{8})$/, async (ctx) => {
@@ -20,19 +21,22 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
     }
 
     const label = format === "video" ? "📹 ویدئو" : "🖼 عکس";
-
-    await ctx.editMessageText(
-      `⬇️ <b>در حال دانلود از Instagram...</b>\nنوع: ${label}\n\n⏳ لطفاً صبر کنید...`,
-      { parse_mode: "HTML" },
-    );
+    const { jobId, signal } = createCancelJob();
+    const kb = cancelKeyboard(jobId);
 
     let lastUpdateTime = Date.now();
     let downloadedPath: string | null = null;
 
     try {
+      await ctx.editMessageText(
+        `⬇️ <b>در حال دانلود از Instagram...</b>\nنوع: ${label}\n\n⏳ لطفاً صبر کنید...`,
+        { parse_mode: "HTML", reply_markup: kb },
+      );
+
       const result = await downloadMedia({
         url,
         format: "best",
+        signal,
         onProgress: async (pct) => {
           const now = Date.now();
           if (now - lastUpdateTime < 3000) return;
@@ -42,7 +46,7 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
             await ctx.editMessageText(
               `⬇️ <b>در حال دانلود از Instagram...</b>\n\n` +
               `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${pct}%`,
-              { parse_mode: "HTML" },
+              { parse_mode: "HTML", reply_markup: kb },
             );
           } catch { }
         },
@@ -77,12 +81,17 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
       await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
       logger.info({ url, format, fileSizeMb }, "Instagram download sent");
     } catch (err) {
-      logger.error({ err, url }, "Instagram download failed");
-      await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Instagram</b>\n\nممکن است پست خصوصی باشد یا لینک منقضی شده باشد.`,
-        { parse_mode: "HTML" },
-      );
+      if (isCancelledError(err)) {
+        await ctx.editMessageText(`🛑 <b>دانلود لغو شد.</b>`, { parse_mode: "HTML" });
+      } else {
+        logger.error({ err, url }, "Instagram download failed");
+        await ctx.editMessageText(
+          `❌ <b>خطا در دانلود از Instagram</b>\n\nممکن است پست خصوصی باشد یا لینک منقضی شده باشد.`,
+          { parse_mode: "HTML" },
+        );
+      }
     } finally {
+      endCancelJob(jobId);
       // Always queue cleanup of the downloaded file (auto-delete after 120s)
       if (downloadedPath) scheduleFileDeletion(downloadedPath, 120_000);
     }

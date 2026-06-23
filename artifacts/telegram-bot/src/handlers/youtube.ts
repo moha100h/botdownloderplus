@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { createReadStream } from "fs";
 import { basename } from "path";
 import { storeUrl, getUrl } from "../utils/urlCache.js";
+import { createCancelJob, endCancelJob, cancelKeyboard, isCancelledError } from "../utils/cancellation.js";
 
 const FORMAT_LABEL: Record<string, string> = {
   mp3: "🎵 MP3",
@@ -33,7 +34,12 @@ export function registerYouTubeHandler(bot: Bot<BotContext>): void {
       return;
     }
 
-    await tryDownload(ctx, url, format, id);
+    const { jobId, signal } = createCancelJob();
+    try {
+      await tryDownload(ctx, url, format, id, jobId, signal);
+    } finally {
+      endCancelJob(jobId);
+    }
   });
 }
 
@@ -42,13 +48,16 @@ async function tryDownload(
   url: string,
   format: string,
   id: string,
+  jobId: string,
+  signal: AbortSignal,
   attempt = 1,
 ): Promise<void> {
   const label = FORMAT_LABEL[format] ?? format;
+  const kb = cancelKeyboard(jobId);
 
   await ctx.editMessageText(
     `▶️ <b>YouTube — در حال دانلود</b>\nفرمت: ${label}${attempt > 1 ? ` (تلاش ${attempt})` : ""}\n\n⏳ لطفاً صبر کنید...`,
-    { parse_mode: "HTML" },
+    { parse_mode: "HTML", reply_markup: kb },
   );
 
   let lastUpdateTime = Date.now();
@@ -59,6 +68,7 @@ async function tryDownload(
       url,
       format: format as "mp3" | "mp4_360" | "mp4_720" | "mp4_1080",
       maxFileSizeMb: config.maxFileSizeMb,
+      signal,
       onProgress: async (pct) => {
         const now = Date.now();
         if (now - lastUpdateTime < 3000) return;
@@ -67,7 +77,7 @@ async function tryDownload(
         try {
           await ctx.editMessageText(
             `▶️ <b>YouTube — در حال دانلود</b>\nفرمت: ${label}\n\n${"█".repeat(filled)}${"░".repeat(10 - filled)} ${pct}%`,
-            { parse_mode: "HTML" },
+            { parse_mode: "HTML", reply_markup: kb },
           );
         } catch { }
       },
@@ -94,6 +104,11 @@ async function tryDownload(
     await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
     logger.info({ url, format, fileSizeMb: result.fileSizeMb }, "YouTube download sent");
   } catch (err: any) {
+    if (isCancelledError(err)) {
+      await ctx.editMessageText(`🛑 <b>دانلود لغو شد.</b>`, { parse_mode: "HTML" });
+      return;
+    }
+
     // File too large — auto-fallback to lower quality
     if (err?.code === "FILE_TOO_LARGE") {
       const fileSizeMb: number = err.fileSizeMb ?? 0;
@@ -106,7 +121,7 @@ async function tryDownload(
           `⚠️ <b>${label} خیلی بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\n🔄 در حال تلاش با ${FORMAT_LABEL[fallbackFormat]}...`,
           { parse_mode: "HTML" },
         );
-        return tryDownload(ctx, url, fallbackFormat, id, attempt + 1);
+        return tryDownload(ctx, url, fallbackFormat, id, jobId, signal, attempt + 1);
       } else {
         await ctx.editMessageText(
           `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\nحتی MP3 هم از حد مجاز بیشتر است.`,

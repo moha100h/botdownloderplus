@@ -8,6 +8,7 @@ import { createReadStream } from "fs";
 import { basename } from "path";
 import { storeUrl, getUrl } from "../utils/urlCache.js";
 import { isSpotifyPlaylist } from "../utils/platform.js";
+import { createCancelJob, endCancelJob, cancelKeyboard, isCancelledError } from "../utils/cancellation.js";
 
 export function registerSpotifyHandler(bot: Bot<BotContext>): void {
   // Single track download
@@ -21,18 +22,22 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
       return;
     }
 
-    const statusMsg = await ctx.editMessageText(
-      `🟢 <b>Spotify</b>\n\n🔍 در حال دریافت اطلاعات آهنگ...`,
-      { parse_mode: "HTML" },
-    );
+    const { jobId, signal } = createCancelJob();
+    const kb = cancelKeyboard(jobId);
 
     let lastUpdateTime = Date.now();
     let downloadedPath: string | null = null;
 
     try {
+      await ctx.editMessageText(
+        `🟢 <b>Spotify</b>\n\n🔍 در حال دریافت اطلاعات آهنگ...`,
+        { parse_mode: "HTML", reply_markup: kb },
+      );
+
       const result = await downloadSpotifyTrack(url, {
+        signal,
         onStatus: async (msg) => {
-          try { await ctx.editMessageText(`🟢 <b>Spotify</b>\n\n${msg}`, { parse_mode: "HTML" }); } catch { }
+          try { await ctx.editMessageText(`🟢 <b>Spotify</b>\n\n${msg}`, { parse_mode: "HTML", reply_markup: kb }); } catch { }
         },
         onProgress: async (pct) => {
           const now = Date.now();
@@ -42,7 +47,7 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
           try {
             await ctx.editMessageText(
               `🟢 <b>Spotify — در حال دانلود...</b>\n\n${"█".repeat(filled)}${"░".repeat(10 - filled)} ${pct}%`,
-              { parse_mode: "HTML" },
+              { parse_mode: "HTML", reply_markup: kb },
             );
           } catch { }
         },
@@ -68,12 +73,17 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
       await ctx.editMessageText(`✅ <b>دانلود کامل شد!</b>`, { parse_mode: "HTML" });
       logger.info({ url, fileSizeMb: result.fileSizeMb }, "Spotify track sent");
     } catch (err: any) {
-      logger.error({ err, url }, "Spotify download failed");
-      await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Spotify</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
-        { parse_mode: "HTML" },
-      );
+      if (isCancelledError(err)) {
+        await ctx.editMessageText(`🛑 <b>دانلود لغو شد.</b>`, { parse_mode: "HTML" });
+      } else {
+        logger.error({ err, url }, "Spotify download failed");
+        await ctx.editMessageText(
+          `❌ <b>خطا در دانلود از Spotify</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
+          { parse_mode: "HTML" },
+        );
+      }
     } finally {
+      endCancelJob(jobId);
       // Always queue cleanup of the downloaded file (auto-delete after 120s)
       if (downloadedPath) scheduleFileDeletion(downloadedPath, 120_000);
     }
@@ -90,14 +100,21 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
       return;
     }
 
-    await ctx.editMessageText(`📋 <b>دانلود پلی‌لیست Spotify</b>\n\n🔍 در حال پردازش...`, { parse_mode: "HTML" });
+    const { jobId, signal } = createCancelJob();
+    const kb = cancelKeyboard(jobId);
 
     let sentCount = 0;
 
     try {
+      await ctx.editMessageText(
+        `📋 <b>دانلود پلی‌لیست Spotify</b>\n\n🔍 در حال پردازش...`,
+        { parse_mode: "HTML", reply_markup: kb },
+      );
+
       await downloadSpotifyPlaylist(url, {
+        signal,
         onStatus: async (msg) => {
-          try { await ctx.editMessageText(`📋 <b>پلی‌لیست Spotify</b>\n\n${msg}`, { parse_mode: "HTML" }); } catch { }
+          try { await ctx.editMessageText(`📋 <b>پلی‌لیست Spotify</b>\n\n${msg}`, { parse_mode: "HTML", reply_markup: kb }); } catch { }
         },
         onTrackDone: async (result, index, total) => {
           if (result.fileSizeMb > config.maxFileSizeMb) {
@@ -107,7 +124,7 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
           try {
             await ctx.editMessageText(
               `📋 <b>پلی‌لیست Spotify</b>\n\n📤 ارسال آهنگ ${index} از ${total}...`,
-              { parse_mode: "HTML" },
+              { parse_mode: "HTML", reply_markup: kb },
             );
             const file = new InputFile(createReadStream(result.filePath), basename(result.filePath));
             await ctx.replyWithAudio(file, {
@@ -123,16 +140,32 @@ export function registerSpotifyHandler(bot: Bot<BotContext>): void {
         },
       });
 
-      await ctx.editMessageText(
-        `✅ <b>پلی‌لیست کامل شد!</b>\n\n${sentCount} آهنگ با موفقیت ارسال شد.`,
-        { parse_mode: "HTML" },
-      );
+      if (signal.aborted) {
+        await ctx.editMessageText(
+          `🛑 <b>پلی‌لیست لغو شد.</b>\n\n${sentCount} آهنگ ارسال شده بود.`,
+          { parse_mode: "HTML" },
+        );
+      } else {
+        await ctx.editMessageText(
+          `✅ <b>پلی‌لیست کامل شد!</b>\n\n${sentCount} آهنگ با موفقیت ارسال شد.`,
+          { parse_mode: "HTML" },
+        );
+      }
     } catch (err: any) {
-      logger.error({ err, url }, "Spotify playlist download failed");
-      await ctx.editMessageText(
-        `❌ <b>خطا در دانلود پلی‌لیست</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
-        { parse_mode: "HTML" },
-      );
+      if (isCancelledError(err)) {
+        await ctx.editMessageText(
+          `🛑 <b>پلی‌لیست لغو شد.</b>\n\n${sentCount} آهنگ ارسال شده بود.`,
+          { parse_mode: "HTML" },
+        );
+      } else {
+        logger.error({ err, url }, "Spotify playlist download failed");
+        await ctx.editMessageText(
+          `❌ <b>خطا در دانلود پلی‌لیست</b>\n\n${err?.message ?? "خطای ناشناخته"}\n\nلطفاً مجدداً تلاش کنید.`,
+          { parse_mode: "HTML" },
+        );
+      }
+    } finally {
+      endCancelJob(jobId);
     }
   });
 }

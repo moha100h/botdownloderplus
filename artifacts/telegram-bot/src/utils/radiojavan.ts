@@ -94,10 +94,10 @@ async function fetchRjApi(type: RjType, slug: string): Promise<RjApiResponse> {
 }
 
 /** Download a direct file URL to disk via streaming. */
-async function downloadDirect(fileUrl: string, outputPath: string): Promise<void> {
-  const res = await fetch(fileUrl, { headers: BROWSER_HEADERS });
+async function downloadDirect(fileUrl: string, outputPath: string, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(fileUrl, { headers: BROWSER_HEADERS, signal });
   if (!res.ok || !res.body) throw new Error(`Direct download failed: ${res.status}`);
-  await pipeline(Readable.fromWeb(res.body as any), createWriteStream(outputPath));
+  await pipeline(Readable.fromWeb(res.body as any), createWriteStream(outputPath), { signal });
 }
 
 /** Extract the audio track from a video file into an MP3 using ffmpeg. */
@@ -135,6 +135,7 @@ export interface RjDownloadResult {
 export async function downloadRadioJavan(
   url: string,
   preferredFormat: "mp3" | "video",
+  signal?: AbortSignal,
 ): Promise<RjDownloadResult> {
   ensureDownloadDir();
 
@@ -168,9 +169,23 @@ export async function downloadRadioJavan(
   const outputPath = join(config.downloadDir, `${uid}.${ext}`);
 
   logger.info({ slug: resolved.slug, type: resolved.type, fileUrl }, "Downloading from RJ direct link");
-  await downloadDirect(fileUrl, outputPath);
+  try {
+    await downloadDirect(fileUrl, outputPath, signal);
+  } catch (err) {
+    // Abort during streaming may leave a partial file on disk — remove it.
+    if (signal?.aborted || (err as { name?: string })?.name === "AbortError") {
+      await unlink(findDownloadedFile(uid) ?? outputPath).catch(() => {});
+      throw Object.assign(new Error("عملیات لغو شد"), { code: "CANCELLED" });
+    }
+    throw err;
+  }
 
   const downloadedPath = findDownloadedFile(uid) ?? outputPath;
+
+  if (signal?.aborted) {
+    await unlink(downloadedPath).catch(() => {});
+    throw Object.assign(new Error("عملیات لغو شد"), { code: "CANCELLED" });
+  }
 
   // Honour the requested format: if the source is a video but the user asked
   // for MP3, extract the audio track with ffmpeg and deliver that instead.
