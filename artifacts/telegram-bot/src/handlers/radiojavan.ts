@@ -7,19 +7,23 @@ import { config } from "../config.js";
 import { createReadStream } from "fs";
 import { basename } from "path";
 import { isRadioJavanVideo } from "../utils/platform.js";
+import { storeUrl, getUrl } from "../utils/urlCache.js";
 
 export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
-  bot.callbackQuery(/^rj:(.+):(.+)$/, async (ctx) => {
+  bot.callbackQuery(/^rj:(mp3|video):([0-9a-f]{8})$/, async (ctx) => {
     await ctx.answerCallbackQuery();
-    const [, format, encodedUrl] = ctx.match;
-    const url = Buffer.from(encodedUrl, "base64url").toString("utf8");
+    const [, format, id] = ctx.match;
+    const url = getUrl(id);
+
+    if (!url) {
+      await ctx.editMessageText("⌛ این لینک منقضی شده است. لطفاً دوباره لینک را ارسال کنید.", { parse_mode: "HTML" });
+      return;
+    }
 
     const label = format === "mp3" ? "🎵 MP3" : "📹 ویدئو";
 
-    const statusMsg = await ctx.editMessageText(
-      `⬇️ <b>در حال دانلود از Radio Javan...</b>\n` +
-      `فرمت: ${label}\n\n` +
-      `⏳ لطفاً صبر کنید...`,
+    await ctx.editMessageText(
+      `⬇️ <b>در حال دانلود از Radio Javan...</b>\nفرمت: ${label}\n\n⏳ لطفاً صبر کنید...`,
       { parse_mode: "HTML" },
     );
 
@@ -33,13 +37,14 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
           const now = Date.now();
           if (now - lastUpdateTime < 3000) return;
           lastUpdateTime = now;
+          const filled = Math.floor(pct / 10);
           try {
             await ctx.editMessageText(
               `⬇️ <b>در حال دانلود از Radio Javan...</b>\n\n` +
-              `${"▓".repeat(Math.floor(pct / 10))}${"░".repeat(10 - Math.floor(pct / 10))} ${pct}%`,
+              `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${pct}%`,
               { parse_mode: "HTML" },
             );
-          } catch { /* ignore */ }
+          } catch { }
         },
       });
 
@@ -60,12 +65,12 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
       if (format === "mp3") {
         await ctx.replyWithAudio(file, {
           title: result.title,
-          caption: `🎵 <b>${result.title}</b>\n\nدانلود شده از Radio Javan`,
+          caption: `🎵 <b>${result.title}</b>\n\nدانلود شده از Radio Javan 📻`,
           parse_mode: "HTML",
         });
       } else {
         await ctx.replyWithVideo(file, {
-          caption: `🎬 <b>${result.title}</b>\n\nدانلود شده از Radio Javan`,
+          caption: `🎬 <b>${result.title}</b>\n\nدانلود شده از Radio Javan 📻`,
           parse_mode: "HTML",
         });
       }
@@ -76,8 +81,7 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
     } catch (err) {
       logger.error({ err, url }, "RadioJavan download failed");
       await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Radio Javan</b>\n\n` +
-        `لطفاً لینک را بررسی کنید و مجدداً تلاش نمایید.`,
+        `❌ <b>خطا در دانلود از Radio Javan</b>\n\nلطفاً لینک را بررسی کنید و مجدداً تلاش نمایید.`,
         { parse_mode: "HTML" },
       );
     }
@@ -85,10 +89,10 @@ export function registerRadioJavanHandler(bot: Bot<BotContext>): void {
 }
 
 export function buildRadioJavanKeyboard(url: string): InlineKeyboard {
-  const encoded = Buffer.from(url).toString("base64url");
-  const keyboard = new InlineKeyboard().text("🎵 دانلود MP3", `rj:mp3:${encoded}`);
+  const id = storeUrl(url);
+  const keyboard = new InlineKeyboard().text("🎵 دانلود MP3", `rj:mp3:${id}`);
   if (isRadioJavanVideo(url)) {
-    keyboard.text("📹 دانلود ویدئو", `rj:video:${encoded}`);
+    keyboard.text("📹 دانلود ویدئو", `rj:video:${id}`);
   }
   return keyboard;
 }

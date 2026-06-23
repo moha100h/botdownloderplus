@@ -6,20 +6,23 @@ import { logger } from "../utils/logger.js";
 import { config } from "../config.js";
 import { createReadStream } from "fs";
 import { basename } from "path";
+import { storeUrl, getUrl } from "../utils/urlCache.js";
 
 export function registerInstagramHandler(bot: Bot<BotContext>): void {
-  bot.callbackQuery(/^ig:(.+):(.+)$/, async (ctx) => {
+  bot.callbackQuery(/^ig:(video|photo):([0-9a-f]{8})$/, async (ctx) => {
     await ctx.answerCallbackQuery();
-    const [, format, encodedUrl] = ctx.match;
-    const url = Buffer.from(encodedUrl, "base64url").toString("utf8");
+    const [, format, id] = ctx.match;
+    const url = getUrl(id);
 
-    const isVideo = format === "video";
-    const label = isVideo ? "📹 ویدئو" : "🖼 عکس";
+    if (!url) {
+      await ctx.editMessageText("⌛ این لینک منقضی شده است. لطفاً دوباره لینک را ارسال کنید.", { parse_mode: "HTML" });
+      return;
+    }
 
-    const statusMsg = await ctx.editMessageText(
-      `⬇️ <b>در حال دانلود از Instagram...</b>\n` +
-      `نوع: ${label}\n\n` +
-      `⏳ لطفاً صبر کنید...`,
+    const label = format === "video" ? "📹 ویدئو" : "🖼 عکس";
+
+    await ctx.editMessageText(
+      `⬇️ <b>در حال دانلود از Instagram...</b>\nنوع: ${label}\n\n⏳ لطفاً صبر کنید...`,
       { parse_mode: "HTML" },
     );
 
@@ -33,21 +36,21 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
           const now = Date.now();
           if (now - lastUpdateTime < 3000) return;
           lastUpdateTime = now;
+          const filled = Math.floor(pct / 10);
           try {
             await ctx.editMessageText(
               `⬇️ <b>در حال دانلود از Instagram...</b>\n\n` +
-              `${"▓".repeat(Math.floor(pct / 10))}${"░".repeat(10 - Math.floor(pct / 10))} ${pct}%`,
+              `${"█".repeat(filled)}${"░".repeat(10 - filled)} ${pct}%`,
               { parse_mode: "HTML" },
             );
-          } catch { /* ignore */ }
+          } catch { }
         },
       });
 
       const fileSizeMb = getFileSizeMb(result.filePath);
       if (fileSizeMb > config.maxFileSizeMb) {
         await ctx.editMessageText(
-          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\n\n` +
-          `محدودیت تلگرام: ${config.maxFileSizeMb} MB`,
+          `⚠️ <b>فایل بیش از حد بزرگ است</b> (${fileSizeMb.toFixed(1)} MB)\nمحدودیت: ${config.maxFileSizeMb} MB`,
           { parse_mode: "HTML" },
         );
         deleteFile(result.filePath);
@@ -58,7 +61,7 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
 
       const file = new InputFile(createReadStream(result.filePath), basename(result.filePath));
 
-      if (isVideo) {
+      if (format === "video") {
         await ctx.replyWithVideo(file, {
           caption: `📸 <b>Instagram</b>\n\n${result.title || ""}`,
           parse_mode: "HTML",
@@ -76,8 +79,7 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
     } catch (err) {
       logger.error({ err, url }, "Instagram download failed");
       await ctx.editMessageText(
-        `❌ <b>خطا در دانلود از Instagram</b>\n\n` +
-        `ممکن است پست خصوصی باشد یا لینک منقضی شده باشد.`,
+        `❌ <b>خطا در دانلود از Instagram</b>\n\nممکن است پست خصوصی باشد یا لینک منقضی شده باشد.`,
         { parse_mode: "HTML" },
       );
     }
@@ -85,8 +87,8 @@ export function registerInstagramHandler(bot: Bot<BotContext>): void {
 }
 
 export function buildInstagramKeyboard(url: string): InlineKeyboard {
-  const encoded = Buffer.from(url).toString("base64url");
+  const id = storeUrl(url);
   return new InlineKeyboard()
-    .text("📹 دانلود ویدئو", `ig:video:${encoded}`)
-    .text("🖼 دانلود عکس", `ig:photo:${encoded}`);
+    .text("📹 دانلود ویدئو", `ig:video:${id}`)
+    .text("🖼 دانلود عکس", `ig:photo:${id}`);
 }
