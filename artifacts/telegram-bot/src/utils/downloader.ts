@@ -1,6 +1,6 @@
 import YTDlpWrapModule from "yt-dlp-wrap";
 import { join } from "path";
-import { existsSync } from "fs";
+import { existsSync, writeFileSync, readdirSync } from "fs";
 import { randomUUID } from "crypto";
 import { config } from "../config.js";
 import { ensureDownloadDir, getFileSizeMb, findDownloadedFile } from "./fileUtils.js";
@@ -34,6 +34,136 @@ export async function getYtDlp(): Promise<InstanceType<typeof YTDlpWrap>> {
     }
   }
   return ytDlp;
+}
+
+/**
+ * Write the configured Instagram cookies to a temp cookies.txt file (once) and
+ * return its path. Instagram blocks anonymous requests from datacenter IPs, so
+ * yt-dlp needs a logged-in session to fetch posts, reels, carousels & stories.
+ * Returns null when no cookies are configured.
+ */
+let igCookiesPath: string | null = null;
+export function getInstagramCookiesFile(): string | null {
+  if (!config.instagramCookies) return null;
+  if (igCookiesPath && existsSync(igCookiesPath)) return igCookiesPath;
+  ensureDownloadDir();
+  const path = join(config.downloadDir, ".instagram-cookies.txt");
+  let contents = config.instagramCookies;
+  // Netscape cookie files must start with this header line or yt-dlp rejects them.
+  if (!contents.startsWith("# Netscape HTTP Cookie File") && !contents.startsWith("# HTTP Cookie File")) {
+    contents = `# Netscape HTTP Cookie File\n${contents}`;
+  }
+  writeFileSync(path, contents.endsWith("\n") ? contents : `${contents}\n`, { mode: 0o600 });
+  igCookiesPath = path;
+  logger.info("Instagram cookies file written");
+  return path;
+}
+
+export function hasInstagramCookies(): boolean {
+  return config.instagramCookies.length > 0;
+}
+
+export type IgMediaType = "photo" | "video";
+
+export interface IgMediaItem {
+  filePath: string;
+  type: IgMediaType;
+  fileSizeMb: number;
+}
+
+const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "heic", "gif"]);
+const VIDEO_EXTS = new Set(["mp4", "mov", "webm", "mkv", "m4v"]);
+
+/** Authentication failures from Instagram (login/cookies required). */
+export class InstagramAuthError extends Error {
+  code = "IG_AUTH";
+  constructor(message = "برای دانلود از اینستاگرام نیاز به ورود (کوکی) است") {
+    super(message);
+    this.name = "InstagramAuthError";
+  }
+}
+
+function isInstagramAuthError(err: unknown): boolean {
+  const msg = (err as { message?: string })?.message ?? "";
+  return /login required|use --cookies|empty media response|only available for registered|rate-limit reached|HTTP Error 401|HTTP Error 403|HTTP Error 429|requested content is not available/i.test(
+    msg,
+  );
+}
+
+/**
+ * Download every media item in an Instagram post/reel/story. Carousels contain
+ * multiple photos/videos which yt-dlp exposes as a playlist, so we download the
+ * whole playlist (no `--no-playlist`) and collect all produced files.
+ */
+export async function downloadInstagram(opts: {
+  url: string;
+  onProgress?: (pct: number) => void;
+  onStatus?: (msg: string) => void;
+  signal?: AbortSignal;
+}): Promise<{ items: IgMediaItem[]; title: string }> {
+  ensureDownloadDir();
+  const dl = await getYtDlp();
+  const uid = randomUUID();
+  // %(playlist_index)s numbers carousel items (1,2,3…); single posts get "NA".
+  const outputTemplate = join(config.downloadDir, `${uid}.%(playlist_index)s.%(ext)s`);
+
+  const cookiesFile = getInstagramCookiesFile();
+  const args = [
+    opts.url,
+    "-o", outputTemplate,
+    "--no-warnings",
+    "--restrict-filenames",
+    "--yes-playlist",
+    "--merge-output-format", "mp4",
+  ];
+  if (cookiesFile) args.push("--cookies", cookiesFile);
+
+  logger.debug({ hasCookies: !!cookiesFile }, "Starting Instagram download");
+
+  try {
+    await execDownload(dl, args, opts.onProgress, opts.signal);
+  } catch (err) {
+    if (isCancelledError(err)) throw err;
+    if (isInstagramAuthError(err)) throw new InstagramAuthError();
+    throw err;
+  }
+
+  // Collect every produced file sharing the uid prefix, in carousel order.
+  const files = readdirSync(config.downloadDir)
+    .filter((f) => f.startsWith(`${uid}.`) && !f.endsWith(".part") && !f.endsWith(".ytdl"))
+    .sort((a, b) => {
+      const idx = (f: string) => {
+        const m = f.match(new RegExp(`^${uid}\\.(\\d+)\\.`));
+        return m ? Number(m[1]) : 0;
+      };
+      return idx(a) - idx(b);
+    });
+
+  const items: IgMediaItem[] = [];
+  for (const f of files) {
+    const ext = f.split(".").pop()?.toLowerCase() ?? "";
+    let type: IgMediaType | null = null;
+    if (VIDEO_EXTS.has(ext)) type = "video";
+    else if (IMAGE_EXTS.has(ext)) type = "photo";
+    if (!type) continue; // skip .json/.description/etc.
+    const filePath = join(config.downloadDir, f);
+    items.push({ filePath, type, fileSizeMb: getFileSizeMb(filePath) });
+  }
+
+  if (items.length === 0) {
+    throw new Error("هیچ فایلی برای دانلود پیدا نشد");
+  }
+
+  let title = "Instagram";
+  try {
+    const info = await dl.getVideoInfo(
+      cookiesFile ? [opts.url, "--cookies", cookiesFile] : [opts.url],
+    );
+    title = (info as Record<string, unknown>).title as string ?? "Instagram";
+  } catch { }
+
+  logger.info({ count: items.length, title }, "Instagram download complete");
+  return { items, title };
 }
 
 export type DownloadFormat = "mp3" | "mp4_360" | "mp4_720" | "mp4_1080" | "best";

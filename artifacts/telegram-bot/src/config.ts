@@ -30,4 +30,7 @@ export const config = {
   // Empty string => use the default Telegram cloud API.
   botApiServerUrl,
   useLocalBotApi: botApiServerUrl.length > 0,
+  // Instagram session cookies (Netscape cookies.txt format) — required because
+  // Instagram blocks anonymous requests from datacenter IPs. Empty => no auth.
+  instagramCookies: optional("INSTAGRAM_COOKIES", "").trim(),
 } as const;
