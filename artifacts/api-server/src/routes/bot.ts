@@ -1,12 +1,11 @@
 import { Router, type IRouter } from "express";
 import { spawn, type ChildProcess } from "child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync } from "fs";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
+import { resolve } from "path";
 import { logger } from "../lib/logger.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const BOT_DIR = resolve(__dirname, "../../../telegram-bot");
+const WORKSPACE_ROOT = process.cwd();
+const BOT_DIR = resolve(WORKSPACE_ROOT, "artifacts/telegram-bot");
 const ENV_PATH = resolve(BOT_DIR, ".env");
 const STATE_PATH = resolve(BOT_DIR, ".bot-state.json");
 
@@ -71,7 +70,7 @@ function startBotProcess(): void {
     "pnpm",
     ["--filter", "@workspace/telegram-bot", "run", "dev"],
     {
-      cwd: resolve(__dirname, "../../../.."),
+      cwd: WORKSPACE_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, NODE_ENV: "production" },
     },

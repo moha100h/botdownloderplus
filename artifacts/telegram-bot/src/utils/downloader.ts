@@ -1,18 +1,22 @@
-import YTDlpWrap from "yt-dlp-wrap";
+import YTDlpWrapModule from "yt-dlp-wrap";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { config } from "../config.js";
 import { ensureDownloadDir, getFileSizeMb } from "./fileUtils.js";
 import { logger } from "./logger.js";
 
-let ytDlp: YTDlpWrap | null = null;
+// yt-dlp-wrap is CJS; the actual class lives at .default.default in ESM context
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const YTDlpWrap: typeof YTDlpWrapModule = (YTDlpWrapModule as any).default ?? YTDlpWrapModule;
 
-export async function getYtDlp(): Promise<YTDlpWrap> {
+let ytDlp: InstanceType<typeof YTDlpWrap> | null = null;
+
+export async function getYtDlp(): Promise<InstanceType<typeof YTDlpWrap>> {
   if (!ytDlp) {
     const binaryPath = join(config.downloadDir, ".yt-dlp-bin");
     ytDlp = new YTDlpWrap(binaryPath);
     try {
-      await YTDlpWrap.downloadFromGithub(binaryPath);
+      await (YTDlpWrap as any).downloadFromGithub(binaryPath);
       logger.info("yt-dlp binary downloaded");
     } catch (err) {
       logger.warn({ err }, "Could not download yt-dlp binary, using system yt-dlp if available");
