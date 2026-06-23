@@ -20,7 +20,11 @@ interface SessionData {
 export type BotContext = Context & SessionFlavor<SessionData>;
 
 export function createBot(): Bot<BotContext> {
-  const bot = new Bot<BotContext>(config.botToken);
+  const bot = new Bot<BotContext>(config.botToken, {
+    client: config.useLocalBotApi
+      ? { apiRoot: config.botApiServerUrl }
+      : undefined,
+  });
 
   bot.use(
     session<SessionData, BotContext>({

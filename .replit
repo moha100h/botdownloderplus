@@ -20,6 +20,10 @@ author = "agent"
 task = "workflow.run"
 args = "Telegram Bot"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot API Server"
+
 [[workflows.workflow]]
 name = "Telegram Bot"
 author = "agent"
@@ -30,6 +34,17 @@ args = "pnpm --filter @workspace/telegram-bot run dev"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow]]
+name = "Telegram Bot API Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "telegram-bot-api --local --http-port=9090 --dir=/home/runner/workspace/artifacts/telegram-bot/.tba-data"
 
 [agent]
 stack = "PNPM_WORKSPACE"
@@ -57,3 +72,9 @@ externalPort = 3001
 [[ports]]
 localPort = 23183
 externalPort = 3000
+
+[userenv]
+
+[userenv.shared]
+TELEGRAM_API_ID = "32351310"
+TELEGRAM_API_HASH = "9b4e6a3d9fa116dccef9a20c3c961840"

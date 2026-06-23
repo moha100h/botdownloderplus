@@ -15,6 +15,10 @@ function optional(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+// When a self-hosted Bot API server is configured, bots can upload files up to
+// ~2000 MB instead of the cloud Bot API's 50 MB limit.
+const botApiServerUrl = optional("BOT_API_SERVER_URL", "").trim();
+
 export const config = {
   botToken: required("BOT_TOKEN"),
   adminId: Number(required("ADMIN_ID")),
@@ -23,4 +27,7 @@ export const config = {
   rateLimitRequests: Number(optional("RATE_LIMIT_REQUESTS", "5")),
   rateLimitWindowMs: Number(optional("RATE_LIMIT_WINDOW_MS", "60000")),
   logLevel: optional("LOG_LEVEL", "info"),
+  // Empty string => use the default Telegram cloud API.
+  botApiServerUrl,
+  useLocalBotApi: botApiServerUrl.length > 0,
 } as const;

@@ -44,3 +44,12 @@ Requirement: every sent file auto-deletes after 120s. **Rule:** schedule deletio
 ## yt-dlp binary reuse (GitHub rate limit)
 `YTDlpWrap.downloadFromGithub()` hits GitHub's unauthenticated rate limit (403) and on failure the init code fell back to a pathless `new YTDlpWrap()` = system yt-dlp (not installed) → all downloads break.
 **Fix:** In `getYtDlp()`, if the binary file already exists at `downloads/.yt-dlp-bin`, use it directly via `existsSync` and skip the GitHub download entirely.
+
+## Self-hosted Bot API server lifts the 50MB cap (~2GB)
+The only way past the 50MB upload limit is a self-hosted `telegram-bot-api` (installed as a Nix system dep). Run it as its own workflow: `telegram-bot-api --local --http-port=<PORT> --dir=<abs>/.tba-data`. It reads `--api-id`/`--api-hash` from env vars `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (store as Replit env vars so the workflow process inherits them). Point grammY at it: `new Bot(token, { client: { apiRoot: "http://localhost:<PORT>" } })`. Set `MAX_FILE_SIZE_MB=2000`. Keep `InputFile(createReadStream(...))` multipart — fine for ~2GB to localhost.
+**Migration:** grammY's first call makes the local server log the bot in via MTProto; no explicit cloud `logOut` was needed here (long-polling worked immediately) because nothing else was polling cloud. If you ever see 409 conflicts, call `https://api.telegram.org/bot<TOKEN>/logOut` once while the bot is stopped, then start local.
+**binlog lock:** only ONE telegram-bot-api instance can use a given `--dir` (locks `tqueue.binlog`); a second instance crashes with "Can't lock file ... already in use". Don't run a manual copy while the workflow one runs.
+
+## Replit proxy hijacks some localhost ports — use an un-proxied port for internal servers
+DO NOT put an internal-only server (like telegram-bot-api) on a "supported"/proxied port. Port 8081 silently routed to the mockup-sandbox Vite server (responses like `The server is configured with a public base URL of /__mockup`), so the bot's requests never reached telegram-bot-api even though it was running. Probe with `curl -s -o /dev/null -w "%{http_code}" --max-time 1 http://localhost:<p>/`: `000` = free/un-proxied (good for internal), `302`/other = intercepted. 9090 worked.
+**Readiness check must verify identity, not just reachability:** poll `${apiRoot}/bot<TOKEN>/getMe` and require JSON `ok:true` before `bot.start()` — a plain `fetch(url)` reachability check false-passes when the wrong process answers the port.
