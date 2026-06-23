@@ -1,0 +1,1 @@
+- [Telegram bot stack quirks](telegram-bot-quirks.md) — yt-dlp DRM/Spotify, callback_data limit, ESM interop, system deps

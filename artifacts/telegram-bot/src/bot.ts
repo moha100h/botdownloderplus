@@ -10,6 +10,7 @@ import { registerSpotifyHandler } from "./handlers/spotify.js";
 import { registerInstagramHandler } from "./handlers/instagram.js";
 import { registerRadioJavanHandler } from "./handlers/radiojavan.js";
 import { logger } from "./utils/logger.js";
+import { MAIN_KEYBOARD } from "./keyboard.js";
 
 interface SessionData {
   pendingUrl?: string;
@@ -40,14 +41,86 @@ export function createBot(): Bot<BotContext> {
 
   registerLinkDetector(bot);
 
-  bot.on("message", async (ctx, next) => {
+  // Handle keyboard button presses
+  bot.hears("📖 راهنما", async (ctx) => {
+    await ctx.reply(
+      `📖 <b>راهنمای ربات دانلودر</b>\n\n` +
+      `<b>روش استفاده:</b>\n` +
+      `۱. لینک مورد نظر را کپی کنید\n` +
+      `۲. در این چت ارسال کنید\n` +
+      `۳. فرمت دلخواه را از دکمه‌ها انتخاب کنید\n` +
+      `۴. منتظر دانلود باشید ✅\n\n` +
+      `<b>⚠️ محدودیت‌ها:</b>\n` +
+      `• حداکثر حجم فایل: ۵۰ مگابایت\n` +
+      `• حداکثر ۵ درخواست در دقیقه\n` +
+      `• پست‌های خصوصی اینستاگرام دانلود نمی‌شوند`,
+      { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
+    );
+  });
+
+  bot.hears("ℹ️ درباره", async (ctx) => {
+    await ctx.reply(
+      `ℹ️ <b>درباره ربات دانلودر</b>\n\n` +
+      `• Grammy Framework (Telegram Bot API)\n` +
+      `• yt-dlp (موتور دانلود)\n` +
+      `• Node.js 24 + TypeScript\n\n` +
+      `<b>✨ ویژگی‌ها:</b>\n` +
+      `• دانلود از ۴ پلتفرم\n` +
+      `• نمایش progress bar حین دانلود\n` +
+      `• auto-fallback کیفیت برای فایل‌های بزرگ\n` +
+      `• پشتیبانی از پلی‌لیست Spotify`,
+      { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
+    );
+  });
+
+  bot.hears("▶️ YouTube", async (ctx) => {
+    await ctx.reply(
+      `▶️ <b>YouTube</b>\n\nلینک‌های پشتیبانی شده:\n` +
+      `• <code>https://youtube.com/watch?v=...</code>\n` +
+      `• <code>https://youtu.be/...</code>\n` +
+      `• <code>https://youtube.com/shorts/...</code>\n\n` +
+      `فقط لینک را بفرستید ⬇️`,
+      { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
+    );
+  });
+
+  bot.hears("🟢 Spotify", async (ctx) => {
+    await ctx.reply(
+      `🟢 <b>Spotify</b>\n\nلینک‌های پشتیبانی شده:\n` +
+      `• <code>https://open.spotify.com/track/...</code>\n` +
+      `• <code>https://open.spotify.com/playlist/...</code>\n\n` +
+      `فقط لینک را بفرستید ⬇️`,
+      { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
+    );
+  });
+
+  bot.hears("📸 Instagram", async (ctx) => {
+    await ctx.reply(
+      `📸 <b>Instagram</b>\n\nلینک‌های پشتیبانی شده:\n` +
+      `• <code>https://instagram.com/p/...</code>\n` +
+      `• <code>https://instagram.com/reel/...</code>\n\n` +
+      `فقط لینک را بفرستید ⬇️`,
+      { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
+    );
+  });
+
+  bot.hears("📻 Radio Javan", async (ctx) => {
+    await ctx.reply(
+      `📻 <b>Radio Javan</b>\n\nلینک‌های پشتیبانی شده:\n` +
+      `• <code>https://radiojavan.com/mp3s/mp3/...</code>\n` +
+      `• <code>https://radiojavan.com/videos/video/...</code>\n` +
+      `• <code>https://rj.app/...</code>\n\n` +
+      `فقط لینک را بفرستید ⬇️`,
+      { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
+    );
+  });
+
+  bot.on("message:text", async (ctx, next) => {
     const text = ctx.message?.text;
     if (text && !text.startsWith("/") && !text.includes("http")) {
       await ctx.reply(
-        `❓ لینک معتبری دریافت نشد.\n\n` +
-        `لطفاً یک لینک از YouTube، Spotify، Instagram یا Radio Javan ارسال کنید.\n\n` +
-        `برای راهنما: /help`,
-        { parse_mode: "HTML" },
+        `❓ لینک معتبری دریافت نشد.\n\nلطفاً یک لینک از YouTube، Spotify، Instagram یا Radio Javan ارسال کنید.`,
+        { parse_mode: "HTML", reply_markup: MAIN_KEYBOARD },
       );
     }
     return next();
@@ -65,23 +138,10 @@ export function createBot(): Bot<BotContext> {
 }
 
 export async function setBotCommands(bot: Bot<BotContext>): Promise<void> {
-  await bot.api.setMyCommands([
-    { command: "start", description: "شروع و معرفی ربات" },
-    { command: "help", description: "راهنمای استفاده" },
-    { command: "about", description: "درباره ربات" },
-  ]);
-
-  await bot.api.setMyCommands(
-    [
-      { command: "start", description: "شروع و معرفی ربات" },
-      { command: "help", description: "راهنمای استفاده" },
-      { command: "about", description: "درباره ربات" },
-      { command: "stats", description: "آمار ربات (ادمین)" },
-      { command: "cleanup", description: "پاک‌سازی فایل‌های موقت (ادمین)" },
-      { command: "broadcast", description: "ارسال پیام همگانی (ادمین)" },
-    ],
-    { scope: { type: "chat", chat_id: config.adminId } },
-  );
-
-  logger.info("Bot commands registered");
+  // Clear all command menus — we use keyboard buttons instead
+  await bot.api.deleteMyCommands();
+  try {
+    await bot.api.deleteMyCommands({ scope: { type: "chat", chat_id: config.adminId } });
+  } catch { }
+  logger.info("Bot command menu cleared");
 }

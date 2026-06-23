@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import { BotContext } from "../bot.js";
+import { MAIN_KEYBOARD } from "../keyboard.js";
 import { detectPlatform, extractUrls } from "../utils/platform.js";
 import { buildYouTubeKeyboard } from "./youtube.js";
 import { buildSpotifyKeyboard } from "./spotify.js";
@@ -39,8 +40,7 @@ export function registerLinkDetector(bot: Bot<BotContext>): void {
     }
 
     await ctx.reply(
-      `${info.icon} <b>لینک ${info.name} شناسایی شد!</b>\n\n` +
-      `کیفیت یا فرمت مورد نظر را انتخاب کنید:`,
+      `${info.icon} <b>لینک ${info.name} شناسایی شد!</b>\n\nفرمت مورد نظر را انتخاب کنید:`,
       {
         parse_mode: "HTML",
         reply_markup: keyboard,

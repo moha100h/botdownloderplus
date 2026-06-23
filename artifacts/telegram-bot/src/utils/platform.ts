@@ -20,6 +20,7 @@ const PATTERNS: Record<Platform, RegExp[]> = {
     /(?:https?:\/\/)?(?:www\.)?radiojavan\.com\/mp3s\/mp3\//,
     /(?:https?:\/\/)?(?:www\.)?radiojavan\.com\/videos\/video\//,
     /(?:https?:\/\/)?(?:www\.)?radiojavan\.com\/podcasts\/podcast\//,
+    /(?:https?:\/\/)?rj\.app\//,
   ],
   unknown: [],
 };
@@ -37,6 +38,14 @@ export function extractUrls(text: string): string[] {
   return [...new Set(text.match(urlRegex) ?? [])];
 }
 
+export function isSpotifyPlaylist(url: string): boolean {
+  return /open\.spotify\.com\/(playlist|album)\//.test(url);
+}
+
 export function isRadioJavanVideo(url: string): boolean {
   return /radiojavan\.com\/videos\/video\//.test(url);
+}
+
+export function isRjAppLink(url: string): boolean {
+  return /rj\.app\//.test(url);
 }

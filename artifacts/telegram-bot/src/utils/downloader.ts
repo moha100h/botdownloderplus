@@ -28,25 +28,29 @@ export async function getYtDlp(): Promise<InstanceType<typeof YTDlpWrap>> {
 
 export type DownloadFormat = "mp3" | "mp4_360" | "mp4_720" | "mp4_1080" | "best";
 
-interface DownloadResult {
+export interface DownloadResult {
   filePath: string;
   title: string;
   fileSizeMb: number;
 }
 
-interface DownloadOptions {
+export interface DownloadOptions {
   url: string;
   format: DownloadFormat;
   onProgress?: (percent: number) => void;
+  onStatus?: (status: string) => void;
+  maxFileSizeMb?: number;
 }
 
-function buildYtdlpArgs(url: string, format: DownloadFormat, outputPath: string): string[] {
-  const baseArgs = [url, "-o", outputPath, "--no-playlist", "--no-warnings", "--restrict-filenames"];
+function buildYtdlpArgs(url: string, format: DownloadFormat, outputPath: string, maxFileSizeMb?: number): string[] {
+  const sizeFlag = maxFileSizeMb ? [`--max-filesize`, `${maxFileSizeMb}M`] : [];
+  const baseArgs = [url, "-o", outputPath, "--no-warnings", "--restrict-filenames", ...sizeFlag];
 
   switch (format) {
     case "mp3":
       return [
         ...baseArgs,
+        "--no-playlist",
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
@@ -56,25 +60,53 @@ function buildYtdlpArgs(url: string, format: DownloadFormat, outputPath: string)
     case "mp4_360":
       return [
         ...baseArgs,
+        "--no-playlist",
         "-f", "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]",
         "--merge-output-format", "mp4",
       ];
     case "mp4_720":
       return [
         ...baseArgs,
+        "--no-playlist",
         "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]",
         "--merge-output-format", "mp4",
       ];
     case "mp4_1080":
       return [
         ...baseArgs,
+        "--no-playlist",
         "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]",
         "--merge-output-format", "mp4",
       ];
     case "best":
     default:
-      return [...baseArgs, "-f", "best", "--merge-output-format", "mp4"];
+      return [...baseArgs, "--no-playlist", "-f", "best", "--merge-output-format", "mp4"];
   }
+}
+
+async function execDownload(
+  dl: InstanceType<typeof YTDlpWrap>,
+  args: string[],
+  onProgress?: (pct: number) => void,
+): Promise<void> {
+  let lastPercent = 0;
+  await new Promise<void>((resolve, reject) => {
+    const proc = dl.exec(args);
+    proc.on("ytDlpEvent", (eventType: string, eventData: string) => {
+      if (eventType === "download" && eventData.includes("%")) {
+        const match = eventData.match(/(\d+(?:\.\d+)?)%/);
+        if (match) {
+          const pct = Math.floor(Number(match[1]));
+          if (pct !== lastPercent && pct % 5 === 0) {
+            lastPercent = pct;
+            onProgress?.(pct);
+          }
+        }
+      }
+    });
+    proc.on("error", reject);
+    proc.on("close", () => resolve());
+  });
 }
 
 export async function downloadMedia(opts: DownloadOptions): Promise<DownloadResult> {
@@ -85,51 +117,127 @@ export async function downloadMedia(opts: DownloadOptions): Promise<DownloadResu
   const outputPath = join(config.downloadDir, `${uid}.%(ext)s`);
   const finalPath = join(config.downloadDir, `${uid}.${ext}`);
 
-  const args = buildYtdlpArgs(opts.url, opts.format, outputPath);
-
-  let lastPercent = 0;
-
-  await new Promise<void>((resolve, reject) => {
-    const process = dl.exec(args);
-
-    process.on("ytDlpEvent", (eventType: string, eventData: string) => {
-      if (eventType === "download" && eventData.includes("%")) {
-        const match = eventData.match(/(\d+(?:\.\d+)?)%/);
-        if (match) {
-          const pct = Math.floor(Number(match[1]));
-          if (pct !== lastPercent && pct % 10 === 0) {
-            lastPercent = pct;
-            opts.onProgress?.(pct);
-          }
-        }
-      }
-    });
-
-    process.on("error", reject);
-    process.on("close", () => resolve());
-  });
+  const args = buildYtdlpArgs(opts.url, opts.format, outputPath, opts.maxFileSizeMb);
+  await execDownload(dl, args, opts.onProgress);
 
   let title = "media";
   try {
     const info = await dl.getVideoInfo(opts.url);
     title = (info as Record<string, unknown>).title as string ?? "media";
-  } catch {
-    // ignore
-  }
+  } catch { }
 
   const fileSizeMb = getFileSizeMb(finalPath);
   logger.info({ finalPath, fileSizeMb, title }, "Download complete");
-
   return { filePath: finalPath, title, fileSizeMb };
 }
 
-export async function getMediaInfo(url: string): Promise<{ title: string; duration: number; thumbnail?: string }> {
+// ─── Spotify via oEmbed + YouTube Search ────────────────────────────────────
+
+interface SpotifyOEmbed {
+  title: string;
+  author_name: string;
+  thumbnail_url?: string;
+}
+
+async function getSpotifyTrackInfo(spotifyUrl: string): Promise<SpotifyOEmbed> {
+  const res = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(spotifyUrl)}`);
+  if (!res.ok) throw new Error(`Spotify oEmbed failed: ${res.status}`);
+  return res.json() as Promise<SpotifyOEmbed>;
+}
+
+export async function downloadSpotifyTrack(
+  spotifyUrl: string,
+  opts: { onProgress?: (pct: number) => void; onStatus?: (msg: string) => void },
+): Promise<DownloadResult> {
+  ensureDownloadDir();
   const dl = await getYtDlp();
-  const info = await dl.getVideoInfo(url);
-  const i = info as Record<string, unknown>;
-  return {
-    title: (i.title as string) ?? "Unknown",
-    duration: (i.duration as number) ?? 0,
-    thumbnail: (i.thumbnail as string) ?? undefined,
-  };
+
+  opts.onStatus?.("🔍 در حال دریافت اطلاعات آهنگ از Spotify...");
+  const info = await getSpotifyTrackInfo(spotifyUrl);
+  const searchQuery = `ytsearch1:${info.title} ${info.author_name} official audio`;
+  logger.info({ title: info.title, artist: info.author_name }, "Spotify track info fetched, searching YouTube");
+
+  opts.onStatus?.(`🎵 یافت شد: <b>${info.title}</b> — ${info.author_name}\n⬇️ در حال دانلود...`);
+
+  const uid = randomUUID();
+  const outputPath = join(config.downloadDir, `${uid}.%(ext)s`);
+  const finalPath = join(config.downloadDir, `${uid}.mp3`);
+
+  const args = [
+    searchQuery, "-o", outputPath,
+    "--no-warnings", "--restrict-filenames", "--no-playlist",
+    "-x", "--audio-format", "mp3", "--audio-quality", "0",
+  ];
+
+  await execDownload(dl, args, opts.onProgress);
+
+  const fileSizeMb = getFileSizeMb(finalPath);
+  return { filePath: finalPath, title: `${info.title} — ${info.author_name}`, fileSizeMb };
+}
+
+export async function downloadSpotifyPlaylist(
+  playlistUrl: string,
+  opts: {
+    onProgress?: (pct: number) => void;
+    onStatus?: (msg: string) => void;
+    onTrackDone?: (result: DownloadResult, index: number, total: number) => Promise<void>;
+  },
+): Promise<void> {
+  ensureDownloadDir();
+  const dl = await getYtDlp();
+
+  opts.onStatus?.("📋 در حال دریافت اطلاعات پلی‌لیست...");
+
+  let playlistTitle = "پلی‌لیست";
+  try {
+    const oEmbed = await getSpotifyTrackInfo(playlistUrl);
+    playlistTitle = oEmbed.title;
+  } catch { }
+
+  // Use yt-dlp to extract playlist metadata from Spotify
+  // Fall back: treat playlist as a collection of tracks via flat-playlist
+  opts.onStatus?.(`🎵 پلی‌لیست: <b>${playlistTitle}</b>\n⏳ در حال آماده‌سازی...`);
+
+  const uid = randomUUID();
+  const outputPath = join(config.downloadDir, `${uid}-%(playlist_index)s.%(ext)s`);
+
+  const args = [
+    playlistUrl, "-o", outputPath,
+    "--no-warnings", "--restrict-filenames",
+    "-x", "--audio-format", "mp3", "--audio-quality", "0",
+    "--yes-playlist",
+    "--ignore-errors",
+  ];
+
+  // Track completed files
+  const completedFiles: string[] = [];
+  let trackCount = 0;
+
+  await new Promise<void>((resolve, reject) => {
+    const proc = dl.exec(args);
+    proc.on("ytDlpEvent", (eventType: string, eventData: string) => {
+      if (eventType === "download" && eventData.includes("Downloading item")) {
+        const match = eventData.match(/Downloading item (\d+) of (\d+)/);
+        if (match) {
+          trackCount = Number(match[2]);
+          const current = Number(match[1]);
+          opts.onStatus?.(`⬇️ دانلود آهنگ ${current} از ${trackCount}...`);
+        }
+      }
+    });
+    proc.on("error", reject);
+    proc.on("close", () => resolve());
+  });
+
+  // Find downloaded files
+  const { readdirSync } = await import("fs");
+  const files = readdirSync(config.downloadDir)
+    .filter(f => f.startsWith(uid) && f.endsWith(".mp3"))
+    .sort();
+
+  for (let i = 0; i < files.length; i++) {
+    const filePath = join(config.downloadDir, files[i]);
+    const fileSizeMb = getFileSizeMb(filePath);
+    await opts.onTrackDone?.({ filePath, title: `آهنگ ${i + 1}`, fileSizeMb }, i + 1, files.length);
+  }
 }
